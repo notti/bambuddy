@@ -66,16 +66,28 @@ export interface PrinterCreate {
 }
 
 // Archive types
+export interface ArchiveDuplicate {
+  id: number;
+  print_name: string | null;
+  created_at: string;
+  match_type: 'exact' | 'similar';  // 'exact' = hash match, 'similar' = name match
+}
+
 export interface Archive {
   id: number;
   printer_id: number | null;
   filename: string;
   file_path: string;
   file_size: number;
+  content_hash: string | null;
   thumbnail_path: string | null;
   timelapse_path: string | null;
+  duplicates: ArchiveDuplicate[] | null;
+  duplicate_count: number;
   print_name: string | null;
   print_time_seconds: number | null;
+  actual_time_seconds: number | null;  // Computed from started_at/completed_at
+  time_accuracy: number | null;  // Percentage: 100 = perfect, >100 = faster than estimated
   filament_used_grams: number | null;
   filament_type: string | null;
   filament_color: string | null;
@@ -107,6 +119,8 @@ export interface ArchiveStats {
   total_cost: number;
   prints_by_filament_type: Record<string, number>;
   prints_by_printer: Record<string, number>;
+  average_time_accuracy: number | null;
+  time_accuracy_by_printer: Record<string, number> | null;
 }
 
 export interface BulkUploadResult {
@@ -296,6 +310,12 @@ export const api = {
   deleteArchive: (id: number) =>
     request<void>(`/archives/${id}`, { method: 'DELETE' }),
   getArchiveStats: () => request<ArchiveStats>('/archives/stats'),
+  getArchiveDuplicates: (id: number) =>
+    request<{ duplicates: ArchiveDuplicate[]; count: number }>(`/archives/${id}/duplicates`),
+  backfillContentHashes: () =>
+    request<{ updated: number; errors: Array<{ id: number; error: string }> }>('/archives/backfill-hashes', {
+      method: 'POST',
+    }),
   getArchiveThumbnail: (id: number) => `${API_BASE}/archives/${id}/thumbnail`,
   getArchiveDownload: (id: number) => `${API_BASE}/archives/${id}/download`,
   getArchiveGcode: (id: number) => `${API_BASE}/archives/${id}/gcode`,

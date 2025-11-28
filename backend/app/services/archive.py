@@ -1,3 +1,4 @@
+import hashlib
 import json
 import zipfile
 import shutil
@@ -6,7 +7,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_, or_
 
 from backend.app.core.config import settings
 from backend.app.models.archive import PrintArchive
@@ -470,6 +471,100 @@ class ArchiveService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    @staticmethod
+    def compute_file_hash(file_path: Path) -> str:
+        """Compute SHA256 hash of a file for duplicate detection."""
+        sha256 = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            # Read in chunks to handle large files
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+
+    async def get_duplicate_hashes(self) -> set[str]:
+        """Get all content hashes that appear more than once.
+
+        Returns a set of hashes that have duplicates.
+        """
+        from sqlalchemy import func
+
+        result = await self.db.execute(
+            select(PrintArchive.content_hash)
+            .where(PrintArchive.content_hash.isnot(None))
+            .group_by(PrintArchive.content_hash)
+            .having(func.count(PrintArchive.id) > 1)
+        )
+        return {row[0] for row in result.all()}
+
+    async def find_duplicates(
+        self,
+        archive_id: int,
+        content_hash: str | None = None,
+        print_name: str | None = None,
+        makerworld_model_id: str | None = None,
+    ) -> list[dict]:
+        """Find duplicate archives based on hash or name matching.
+
+        Returns list of dicts with id, print_name, created_at, match_type.
+        """
+        duplicates = []
+
+        # First, find exact matches by content hash
+        if content_hash:
+            result = await self.db.execute(
+                select(PrintArchive)
+                .where(
+                    and_(
+                        PrintArchive.content_hash == content_hash,
+                        PrintArchive.id != archive_id,
+                    )
+                )
+                .order_by(PrintArchive.created_at.desc())
+                .limit(10)
+            )
+            for archive in result.scalars().all():
+                duplicates.append({
+                    "id": archive.id,
+                    "print_name": archive.print_name,
+                    "created_at": archive.created_at,
+                    "match_type": "exact",
+                })
+
+        # Then, find similar matches by print name or MakerWorld ID
+        if print_name or makerworld_model_id:
+            conditions = [PrintArchive.id != archive_id]
+
+            name_conditions = []
+            if print_name:
+                # Match if print names are similar (ignoring case)
+                name_conditions.append(PrintArchive.print_name.ilike(print_name))
+            if makerworld_model_id:
+                # Match by MakerWorld model ID stored in extra_data
+                name_conditions.append(
+                    PrintArchive.extra_data["makerworld_model_id"].astext == makerworld_model_id
+                )
+
+            if name_conditions:
+                conditions.append(or_(*name_conditions))
+
+                result = await self.db.execute(
+                    select(PrintArchive)
+                    .where(and_(*conditions))
+                    .order_by(PrintArchive.created_at.desc())
+                    .limit(10)
+                )
+                for archive in result.scalars().all():
+                    # Don't add if already in duplicates (exact match)
+                    if not any(d["id"] == archive.id for d in duplicates):
+                        duplicates.append({
+                            "id": archive.id,
+                            "print_name": archive.print_name,
+                            "created_at": archive.created_at,
+                            "match_type": "similar",
+                        })
+
+        return duplicates
+
     async def archive_print(
         self,
         printer_id: int | None,
@@ -497,6 +592,9 @@ class ArchiveService:
         # Copy 3MF file
         dest_file = archive_dir / source_file.name
         shutil.copy2(source_file, dest_file)
+
+        # Compute content hash for duplicate detection
+        content_hash = self.compute_file_hash(dest_file)
 
         # Parse 3MF metadata
         parser = ThreeMFParser(dest_file)
@@ -526,6 +624,7 @@ class ArchiveService:
             filename=source_file.name,
             file_path=str(dest_file.relative_to(settings.base_dir)),
             file_size=dest_file.stat().st_size,
+            content_hash=content_hash,
             thumbnail_path=thumbnail_path,
             print_name=metadata.get("print_name") or source_file.stem,
             print_time_seconds=metadata.get("print_time_seconds"),

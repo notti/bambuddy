@@ -15,17 +15,32 @@ class ArchiveUpdate(ArchiveBase):
     printer_id: int | None = None
 
 
+class ArchiveDuplicate(BaseModel):
+    """Reference to a duplicate archive."""
+    id: int
+    print_name: str | None
+    created_at: datetime
+    match_type: str  # "exact" (hash match) or "similar" (name match)
+
+
 class ArchiveResponse(BaseModel):
     id: int
     printer_id: int | None
     filename: str
     file_path: str
     file_size: int
+    content_hash: str | None
     thumbnail_path: str | None
     timelapse_path: str | None
 
+    # Duplicate detection
+    duplicates: list[ArchiveDuplicate] | None = None
+    duplicate_count: int = 0  # Quick count for list views
+
     print_name: str | None
-    print_time_seconds: int | None
+    print_time_seconds: int | None  # Estimated time from slicer
+    actual_time_seconds: int | None = None  # Computed from started_at/completed_at
+    time_accuracy: float | None = None  # Percentage: 100 = perfect, >100 = faster than estimated
     filament_used_grams: float | None
     filament_type: str | None
     filament_color: str | None
@@ -65,6 +80,9 @@ class ArchiveStats(BaseModel):
     total_cost: float
     prints_by_filament_type: dict
     prints_by_printer: dict
+    # Time accuracy stats
+    average_time_accuracy: float | None = None  # Average across all prints with data
+    time_accuracy_by_printer: dict | None = None  # Per-printer accuracy
 
 
 class ProjectPageImage(BaseModel):
