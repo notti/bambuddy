@@ -1,8 +1,11 @@
 from pathlib import Path
 import zipfile
 import io
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+
+logger = logging.getLogger(__name__)
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -595,6 +598,18 @@ async def scan_timelapse(
 
         if best_match and best_diff < timedelta(hours=2):  # Within 2 hours
             matching_file = best_match
+
+    # Strategy 3: If only one timelapse exists and archive was recently completed, use it
+    # This handles cases where printer clock is wrong or timezone issues exist
+    if not matching_file and len(mp4_files) == 1:
+        from datetime import datetime, timedelta
+        archive_completed = archive.completed_at or archive.created_at
+        if archive_completed:
+            time_since_completion = datetime.now() - archive_completed
+            # If archive was completed within the last hour, assume the single timelapse is for it
+            if time_since_completion < timedelta(hours=1):
+                matching_file = mp4_files[0]
+                logger.info(f"Using single timelapse file as fallback: {mp4_files[0].get('name')}")
 
     if not matching_file:
         return {"status": "not_found", "message": "No matching timelapse found on printer"}

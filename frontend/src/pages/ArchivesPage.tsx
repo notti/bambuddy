@@ -50,6 +50,7 @@ import { CalendarView } from '../components/CalendarView';
 import { QRCodeModal } from '../components/QRCodeModal';
 import { PhotoGalleryModal } from '../components/PhotoGalleryModal';
 import { ProjectPageModal } from '../components/ProjectPageModal';
+import { TimelapseViewer } from '../components/TimelapseViewer';
 import { useToast } from '../contexts/ToastContext';
 
 function formatFileSize(bytes: number): string {
@@ -565,45 +566,12 @@ function ArchiveCard({
 
       {/* Timelapse Viewer Modal */}
       {showTimelapse && archive.timelapse_path && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
-          <div className="relative bg-bambu-dark-secondary rounded-xl max-w-4xl w-full mx-4 overflow-hidden">
-            <div className="flex items-center justify-between p-4 border-b border-bambu-dark-tertiary">
-              <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-                <Film className="w-5 h-5 text-bambu-green" />
-                {archive.print_name || archive.filename} - Timelapse
-              </h3>
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    const link = document.createElement('a');
-                    link.href = api.getArchiveTimelapse(archive.id);
-                    link.download = `${archive.print_name || archive.filename}_timelapse.mp4`;
-                    link.click();
-                  }}
-                >
-                  <Download className="w-4 h-4" />
-                  Download
-                </Button>
-                <button
-                  onClick={() => setShowTimelapse(false)}
-                  className="p-1 hover:bg-bambu-dark-tertiary rounded transition-colors"
-                >
-                  <X className="w-5 h-5 text-bambu-gray" />
-                </button>
-              </div>
-            </div>
-            <div className="p-4">
-              <video
-                src={api.getArchiveTimelapse(archive.id)}
-                controls
-                autoPlay
-                className="w-full rounded-lg"
-              />
-            </div>
-          </div>
-        </div>
+        <TimelapseViewer
+          src={api.getArchiveTimelapse(archive.id)}
+          title={`${archive.print_name || archive.filename} - Timelapse`}
+          downloadFilename={`${archive.print_name || archive.filename}_timelapse.mp4`}
+          onClose={() => setShowTimelapse(false)}
+        />
       )}
 
       {/* QR Code Modal */}
