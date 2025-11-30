@@ -1,11 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Save, Loader2, Check, Plus, Plug, AlertTriangle } from 'lucide-react';
+import { Save, Loader2, Check, Plus, Plug, AlertTriangle, RotateCcw } from 'lucide-react';
 import { api } from '../api/client';
 import type { AppSettings, SmartPlug } from '../api/client';
 import { Card, CardContent, CardHeader } from '../components/Card';
 import { Button } from '../components/Button';
 import { SmartPlugCard } from '../components/SmartPlugCard';
 import { AddSmartPlugModal } from '../components/AddSmartPlugModal';
+import { defaultNavItems, getDefaultView, setDefaultView } from '../components/Layout';
 import { useState, useEffect } from 'react';
 
 export function SettingsPage() {
@@ -15,6 +16,17 @@ export function SettingsPage() {
   const [showSaved, setShowSaved] = useState(false);
   const [showPlugModal, setShowPlugModal] = useState(false);
   const [editingPlug, setEditingPlug] = useState<SmartPlug | null>(null);
+  const [defaultView, setDefaultViewState] = useState<string>(getDefaultView());
+
+  const handleDefaultViewChange = (path: string) => {
+    setDefaultViewState(path);
+    setDefaultView(path);
+  };
+
+  const handleResetSidebarOrder = () => {
+    localStorage.removeItem('sidebarOrder');
+    window.location.reload();
+  };
 
   const { data: settings, isLoading } = useQuery({
     queryKey: ['settings'],
@@ -240,6 +252,49 @@ export function SettingsPage() {
                 <p className="text-xs text-bambu-gray mt-1">
                   Used for tracking energy costs per print via smart plugs
                 </p>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <h2 className="text-lg font-semibold text-white">Interface</h2>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div>
+                <label className="block text-sm text-bambu-gray mb-1">
+                  Default view on startup
+                </label>
+                <select
+                  value={defaultView}
+                  onChange={(e) => handleDefaultViewChange(e.target.value)}
+                  className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+                >
+                  {defaultNavItems.map((item) => (
+                    <option key={item.id} value={item.to}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-bambu-gray mt-1">
+                  Page to show when opening the app
+                </p>
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-white">Sidebar order</p>
+                  <p className="text-sm text-bambu-gray">
+                    Drag items in the sidebar to reorder. Reset to default order here.
+                  </p>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleResetSidebarOrder}
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  Reset
+                </Button>
               </div>
             </CardContent>
           </Card>
