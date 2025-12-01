@@ -1,18 +1,22 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Save, Loader2, Check, Plus, Plug, AlertTriangle, RotateCcw, Bell } from 'lucide-react';
+import { Save, Loader2, Check, Plus, Plug, AlertTriangle, RotateCcw, Bell, Download, RefreshCw, ExternalLink, Globe } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { api } from '../api/client';
-import type { AppSettings, SmartPlug, NotificationProvider } from '../api/client';
+import type { AppSettings, SmartPlug, NotificationProvider, UpdateStatus } from '../api/client';
 import { Card, CardContent, CardHeader } from '../components/Card';
 import { Button } from '../components/Button';
 import { SmartPlugCard } from '../components/SmartPlugCard';
 import { AddSmartPlugModal } from '../components/AddSmartPlugModal';
 import { NotificationProviderCard } from '../components/NotificationProviderCard';
 import { AddNotificationModal } from '../components/AddNotificationModal';
+import { SpoolmanSettings } from '../components/SpoolmanSettings';
 import { defaultNavItems, getDefaultView, setDefaultView } from '../components/Layout';
+import { availableLanguages } from '../i18n';
 import { useState, useEffect } from 'react';
 
 export function SettingsPage() {
   const queryClient = useQueryClient();
+  const { t, i18n } = useTranslation();
   const [localSettings, setLocalSettings] = useState<AppSettings | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
@@ -52,6 +56,37 @@ export function SettingsPage() {
     queryFn: api.checkFfmpeg,
   });
 
+  const { data: versionInfo } = useQuery({
+    queryKey: ['version'],
+    queryFn: api.getVersion,
+  });
+
+  const { data: updateCheck, refetch: refetchUpdateCheck, isRefetching: isCheckingUpdate } = useQuery({
+    queryKey: ['updateCheck'],
+    queryFn: api.checkForUpdates,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const { data: updateStatus, refetch: refetchUpdateStatus } = useQuery({
+    queryKey: ['updateStatus'],
+    queryFn: api.getUpdateStatus,
+    refetchInterval: (query) => {
+      const status = query.state.data as UpdateStatus | undefined;
+      // Poll while update is in progress
+      if (status?.status === 'downloading' || status?.status === 'installing') {
+        return 1000;
+      }
+      return false;
+    },
+  });
+
+  const applyUpdateMutation = useMutation({
+    mutationFn: api.applyUpdate,
+    onSuccess: () => {
+      refetchUpdateStatus();
+    },
+  });
+
   // Sync local state when settings load
   useEffect(() => {
     if (settings && !localSettings) {
@@ -69,7 +104,9 @@ export function SettingsPage() {
         settings.default_filament_cost !== localSettings.default_filament_cost ||
         settings.currency !== localSettings.currency ||
         settings.energy_cost_per_kwh !== localSettings.energy_cost_per_kwh ||
-        settings.energy_tracking_mode !== localSettings.energy_tracking_mode;
+        settings.energy_tracking_mode !== localSettings.energy_tracking_mode ||
+        settings.check_updates !== localSettings.check_updates ||
+        settings.notification_language !== localSettings.notification_language;
       setHasChanges(changed);
     }
   }, [settings, localSettings]);
@@ -285,12 +322,32 @@ export function SettingsPage() {
 
           <Card>
             <CardHeader>
-              <h2 className="text-lg font-semibold text-white">Interface</h2>
+              <h2 className="text-lg font-semibold text-white">{t('settings.general')}</h2>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
                 <label className="block text-sm text-bambu-gray mb-1">
-                  Default view on startup
+                  <Globe className="w-4 h-4 inline mr-1" />
+                  {t('settings.language')}
+                </label>
+                <select
+                  value={i18n.language}
+                  onChange={(e) => i18n.changeLanguage(e.target.value)}
+                  className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+                >
+                  {availableLanguages.map((lang) => (
+                    <option key={lang.code} value={lang.code}>
+                      {lang.nativeName} ({lang.name})
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-bambu-gray mt-1">
+                  {t('settings.languageDescription')}
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm text-bambu-gray mb-1">
+                  {t('settings.defaultView')}
                 </label>
                 <select
                   value={defaultView}
@@ -299,12 +356,12 @@ export function SettingsPage() {
                 >
                   {defaultNavItems.map((item) => (
                     <option key={item.id} value={item.to}>
-                      {item.label}
+                      {t(item.labelKey)}
                     </option>
                   ))}
                 </select>
                 <p className="text-xs text-bambu-gray mt-1">
-                  Page to show when opening the app
+                  {t('settings.defaultViewDescription')}
                 </p>
               </div>
               <div className="flex items-center justify-between">
@@ -325,27 +382,137 @@ export function SettingsPage() {
               </div>
             </CardContent>
           </Card>
+        </div>
+
+        {/* Second Column - Spoolman & Updates */}
+        <div className="space-y-6 flex-1 max-w-md">
+          <SpoolmanSettings />
 
           <Card>
             <CardHeader>
-              <h2 className="text-lg font-semibold text-white">About</h2>
+              <h2 className="text-lg font-semibold text-white">Updates</h2>
             </CardHeader>
-            <CardContent>
-              <div className="space-y-2 text-sm">
-                <p className="text-white">Bambusy v0.1.2</p>
-                <p className="text-bambu-gray">
-                  Archive and manage your Bambu Lab 3MF files
-                </p>
-                <p className="text-bambu-gray">
-                  Connect to printers via LAN mode (developer mode required)
-                </p>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-white">Check for updates</p>
+                  <p className="text-sm text-bambu-gray">
+                    Automatically check for new versions on startup
+                  </p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={localSettings.check_updates}
+                    onChange={(e) => updateSetting('check_updates', e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
+                </label>
+              </div>
+
+              <div className="border-t border-bambu-dark-tertiary pt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div>
+                    <p className="text-white">Current version</p>
+                    <p className="text-sm text-bambu-gray">v{versionInfo?.version || '...'}</p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => refetchUpdateCheck()}
+                    disabled={isCheckingUpdate}
+                  >
+                    {isCheckingUpdate ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4" />
+                    )}
+                    Check now
+                  </Button>
+                </div>
+
+                {updateCheck?.update_available ? (
+                  <div className="mt-4 p-3 bg-bambu-green/10 border border-bambu-green/30 rounded-lg">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="text-bambu-green font-medium">
+                          Update available: v{updateCheck.latest_version}
+                        </p>
+                        {updateCheck.release_name && updateCheck.release_name !== updateCheck.latest_version && (
+                          <p className="text-sm text-bambu-gray mt-1">{updateCheck.release_name}</p>
+                        )}
+                        {updateCheck.release_notes && (
+                          <p className="text-sm text-bambu-gray mt-2 whitespace-pre-line line-clamp-3">
+                            {updateCheck.release_notes}
+                          </p>
+                        )}
+                      </div>
+                      {updateCheck.release_url && (
+                        <a
+                          href={updateCheck.release_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-bambu-gray hover:text-white transition-colors"
+                          title="View release on GitHub"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                        </a>
+                      )}
+                    </div>
+
+                    {updateStatus?.status === 'downloading' || updateStatus?.status === 'installing' ? (
+                      <div className="mt-3">
+                        <div className="flex items-center gap-2 text-sm text-bambu-gray">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>{updateStatus.message}</span>
+                        </div>
+                        <div className="mt-2 w-full bg-bambu-dark-tertiary rounded-full h-2">
+                          <div
+                            className="bg-bambu-green h-2 rounded-full transition-all duration-300"
+                            style={{ width: `${updateStatus.progress}%` }}
+                          />
+                        </div>
+                      </div>
+                    ) : updateStatus?.status === 'complete' ? (
+                      <div className="mt-3 p-2 bg-bambu-green/20 rounded text-sm text-bambu-green">
+                        {updateStatus.message}
+                      </div>
+                    ) : updateStatus?.status === 'error' ? (
+                      <div className="mt-3 p-2 bg-red-500/20 rounded text-sm text-red-400">
+                        {updateStatus.error || updateStatus.message}
+                      </div>
+                    ) : (
+                      <Button
+                        className="mt-3"
+                        onClick={() => applyUpdateMutation.mutate()}
+                        disabled={applyUpdateMutation.isPending}
+                      >
+                        {applyUpdateMutation.isPending ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Download className="w-4 h-4" />
+                        )}
+                        Install Update
+                      </Button>
+                    )}
+                  </div>
+                ) : updateCheck?.error ? (
+                  <div className="mt-2 p-2 bg-red-500/10 border border-red-500/30 rounded text-sm text-red-400">
+                    Failed to check for updates: {updateCheck.error}
+                  </div>
+                ) : updateCheck && !updateCheck.update_available ? (
+                  <p className="mt-2 text-sm text-bambu-gray">
+                    You're running the latest version
+                  </p>
+                ) : null}
               </div>
             </CardContent>
           </Card>
         </div>
 
-        {/* Middle Column - Smart Plugs */}
-        <div className="w-96 flex-shrink-0">
+        {/* Third Column - Smart Plugs */}
+        <div className="w-80 flex-shrink-0">
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between">
@@ -397,8 +564,8 @@ export function SettingsPage() {
           </Card>
         </div>
 
-        {/* Right Column - Notifications */}
-        <div className="w-96 flex-shrink-0">
+        {/* Fourth Column - Notifications */}
+        <div className="w-80 flex-shrink-0">
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between">
@@ -422,6 +589,26 @@ export function SettingsPage() {
               <p className="text-sm text-bambu-gray mb-4">
                 Get notified about print events via WhatsApp, Telegram, Email, and more.
               </p>
+
+              {/* Notification Language */}
+              <div className="flex items-center justify-between py-3 border-b border-bambu-dark-tertiary mb-4">
+                <div>
+                  <p className="text-white">{t('settings.notificationLanguage')}</p>
+                  <p className="text-sm text-bambu-gray">{t('settings.notificationLanguageDescription')}</p>
+                </div>
+                <select
+                  value={localSettings.notification_language || 'en'}
+                  onChange={(e) => updateSetting('notification_language', e.target.value)}
+                  className="px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-bambu-green"
+                >
+                  {availableLanguages.map((lang) => (
+                    <option key={lang.code} value={lang.code}>
+                      {lang.nativeName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {providersLoading ? (
                 <div className="flex justify-center py-8">
                   <Loader2 className="w-6 h-6 text-bambu-green animate-spin" />

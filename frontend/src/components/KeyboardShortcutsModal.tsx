@@ -1,11 +1,12 @@
 import { useEffect } from 'react';
 import { X, Keyboard } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent } from './Card';
 
 interface NavItem {
   id: string;
   to: string;
-  label: string;
+  labelKey: string;
 }
 
 interface KeyboardShortcutsModalProps {
@@ -13,11 +14,11 @@ interface KeyboardShortcutsModalProps {
   navItems?: NavItem[];
 }
 
-function getShortcuts(navItems?: NavItem[]) {
+function getShortcuts(navItems: NavItem[] | undefined, t: (key: string) => string) {
   const navShortcuts = navItems
     ? navItems.map((item, index) => ({
         keys: [String(index + 1)],
-        description: `Go to ${item.label}`,
+        description: `Go to ${t(item.labelKey)}`,
       }))
     : [
         { keys: ['1'], description: 'Go to Printers' },
@@ -51,7 +52,8 @@ function KeyBadge({ children }: { children: string }) {
 }
 
 export function KeyboardShortcutsModal({ onClose, navItems }: KeyboardShortcutsModalProps) {
-  const shortcuts = getShortcuts(navItems);
+  const { t } = useTranslation();
+  const shortcuts = getShortcuts(navItems, t);
 
   // Close on Escape key
   useEffect(() => {

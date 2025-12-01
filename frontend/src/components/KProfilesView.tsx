@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Gauge,
@@ -499,10 +499,36 @@ export function KProfilesView() {
     queryFn: () => api.getKProfiles(selectedPrinter!, nozzleDiameter),
     enabled: !!selectedPrinter,
     retry: false,
+    staleTime: 0,  // Always consider data stale to ensure fresh fetch
+    refetchOnMount: 'always',  // Always refetch when component mounts
   });
 
   // Check if error is due to printer not being connected
   const isOfflineError = kprofilesError?.message?.includes('not connected');
+
+  // Auto-select first connected printer
+  useEffect(() => {
+    if (!selectedPrinter && printers && printers.length > 0) {
+      const activePrinter = printers.find((p) => p.is_active);
+      if (activePrinter) {
+        setSelectedPrinter(activePrinter.id);
+      }
+    }
+  }, [selectedPrinter, printers]);
+
+  // Refetch profiles when printer selection changes
+  useEffect(() => {
+    if (selectedPrinter) {
+      // Delay refetch to ensure query is enabled after state update
+      const timer = setTimeout(() => {
+        refetchProfiles();
+      }, 150);
+      return () => clearTimeout(timer);
+    }
+  }, [selectedPrinter, nozzleDiameter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Get connected printers for display
+  const connectedPrinters = printers?.filter((p) => p.is_active) || [];
 
   // Filter profiles based on search query, extruder filter, and flow type
   const filteredProfiles = React.useMemo(() => {
@@ -531,12 +557,6 @@ export function KProfilesView() {
       return matchesSearch && matchesExtruder && matchesFlowType;
     });
   }, [kprofiles?.profiles, searchQuery, extruderFilter, flowTypeFilter]);
-
-  // Auto-select first connected printer
-  const connectedPrinters = printers?.filter((p) => p.is_active) || [];
-  if (!selectedPrinter && connectedPrinters.length > 0) {
-    setSelectedPrinter(connectedPrinters[0].id);
-  }
 
   // Check if selected printer is dual-nozzle (auto-detected from MQTT temperature data)
   const selectedPrinterData = printers?.find((p) => p.id === selectedPrinter);

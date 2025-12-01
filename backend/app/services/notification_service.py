@@ -14,6 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.notification import NotificationProvider
+from backend.app.models.settings import Settings
+from backend.app.i18n import Translator
 
 logger = logging.getLogger(__name__)
 
@@ -64,70 +66,78 @@ class NotificationService:
             logger.warning(f"Invalid quiet hours format for provider {provider.name}")
             return False
 
-    def _format_duration(self, seconds: int | None) -> str:
+    async def _get_notification_language(self, db: AsyncSession) -> str:
+        """Get the notification language from settings."""
+        result = await db.execute(
+            select(Settings).where(Settings.key == "notification_language")
+        )
+        setting = result.scalar_one_or_none()
+        return setting.value if setting else "en"
+
+    def _format_duration(self, seconds: int | None, translator: Translator) -> str:
         """Format duration in seconds to human-readable string."""
         if seconds is None:
-            return "Unknown"
+            return translator.t("notification.unknown")
         hours = seconds // 3600
         minutes = (seconds % 3600) // 60
         if hours > 0:
             return f"{hours}h {minutes}m"
         return f"{minutes}m"
 
-    def _build_print_start_message(self, printer_name: str, data: dict) -> tuple[str, str]:
+    def _build_print_start_message(self, printer_name: str, data: dict, translator: Translator) -> tuple[str, str]:
         """Build notification message for print start event."""
-        filename = data.get("filename", "Unknown")
+        filename = data.get("filename", translator.t("notification.unknown"))
         # Clean up filename
         if filename.endswith(".gcode.3mf"):
             filename = filename[:-10]
         elif filename.endswith(".3mf"):
             filename = filename[:-4]
 
-        title = "Print Started"
+        title = translator.t("notification.print_started")
 
         estimated_time = data.get("raw_data", {}).get("print", {}).get("mc_remaining_time")
-        time_str = self._format_duration(estimated_time * 60 if estimated_time else None)
+        time_str = self._format_duration(estimated_time * 60 if estimated_time else None, translator)
 
-        message = f"{printer_name}: {filename}\nEstimated: {time_str}"
+        message = f"{printer_name}: {filename}\n{translator.t('notification.estimated')}: {time_str}"
         return title, message
 
     def _build_print_complete_message(
-        self, printer_name: str, status: str, data: dict, archive_data: dict | None = None
+        self, printer_name: str, status: str, data: dict, translator: Translator, archive_data: dict | None = None
     ) -> tuple[str, str]:
         """Build notification message for print complete event."""
-        filename = data.get("filename", "Unknown")
+        filename = data.get("filename", translator.t("notification.unknown"))
         if filename.endswith(".gcode.3mf"):
             filename = filename[:-10]
         elif filename.endswith(".3mf"):
             filename = filename[:-4]
 
         if status == "completed":
-            title = "Print Completed"
+            title = translator.t("notification.print_completed")
         elif status == "failed":
-            title = "Print Failed"
+            title = translator.t("notification.print_failed")
         elif status in ("aborted", "stopped", "cancelled"):
-            title = "Print Stopped"
+            title = translator.t("notification.print_stopped")
         else:
-            title = "Print Ended"
+            title = translator.t("notification.print_ended")
 
         lines = [f"{printer_name}: {filename}"]
 
         if archive_data:
             # Add print time if available
             if archive_data.get("print_time_seconds"):
-                lines.append(f"Time: {self._format_duration(archive_data['print_time_seconds'])}")
+                lines.append(f"{translator.t('notification.time')}: {self._format_duration(archive_data['print_time_seconds'], translator)}")
             # Add filament used if available
             if archive_data.get("actual_filament_grams"):
-                lines.append(f"Filament: {archive_data['actual_filament_grams']:.1f}g")
+                lines.append(f"{translator.t('notification.filament')}: {archive_data['actual_filament_grams']:.1f}g")
             # Add failure reason if failed
             if status == "failed" and archive_data.get("failure_reason"):
-                lines.append(f"Reason: {archive_data['failure_reason']}")
+                lines.append(f"{translator.t('notification.reason')}: {archive_data['failure_reason']}")
 
         message = "\n".join(lines)
         return title, message
 
     def _build_progress_message(
-        self, printer_name: str, filename: str, progress: int
+        self, printer_name: str, filename: str, progress: int, translator: Translator
     ) -> tuple[str, str]:
         """Build notification message for print progress milestone."""
         if filename.endswith(".gcode.3mf"):
@@ -135,40 +145,57 @@ class NotificationService:
         elif filename.endswith(".3mf"):
             filename = filename[:-4]
 
-        title = f"Print {progress}% Complete"
+        title = translator.t("notification.print_progress", progress=progress)
         message = f"{printer_name}: {filename}"
         return title, message
 
-    def _build_printer_offline_message(self, printer_name: str) -> tuple[str, str]:
+    def _build_printer_offline_message(self, printer_name: str, translator: Translator) -> tuple[str, str]:
         """Build notification message for printer offline event."""
-        title = "Printer Offline"
-        message = f"{printer_name} has disconnected"
+        title = translator.t("notification.printer_offline")
+        message = translator.t("notification.printer_disconnected", printer=printer_name)
         return title, message
 
     def _build_printer_error_message(
-        self, printer_name: str, error_type: str, error_detail: str | None = None
+        self, printer_name: str, error_type: str, translator: Translator, error_detail: str | None = None
     ) -> tuple[str, str]:
         """Build notification message for printer error event."""
-        title = f"Printer Error: {error_type}"
+        title = translator.t("notification.printer_error", error_type=error_type)
         message = f"{printer_name}"
         if error_detail:
             message += f"\n{error_detail}"
         return title, message
 
     def _build_filament_low_message(
-        self, printer_name: str, slot: int, remaining_percent: int
+        self, printer_name: str, slot: int, remaining_percent: int, translator: Translator
     ) -> tuple[str, str]:
         """Build notification message for low filament event."""
-        title = "Filament Low"
-        message = f"{printer_name}: Slot {slot} at {remaining_percent}%"
+        title = translator.t("notification.filament_low")
+        message = translator.t("notification.slot_at_percent", printer=printer_name, slot=slot, percent=remaining_percent)
+        return title, message
+
+    def _build_maintenance_due_message(
+        self, printer_name: str, maintenance_items: list[dict], translator: Translator
+    ) -> tuple[str, str]:
+        """Build notification message for maintenance due event."""
+        title = translator.t("notification.maintenance_due")
+        lines = [f"{printer_name}:"]
+        for item in maintenance_items:
+            status = translator.t("notification.overdue") if item.get("is_due") else translator.t("notification.soon")
+            lines.append(f"• {item['name']} ({status})")
+        message = "\n".join(lines)
         return title, message
 
     async def send_test_notification(
-        self, provider_type: str, config: dict[str, Any]
+        self, provider_type: str, config: dict[str, Any], db: AsyncSession | None = None
     ) -> tuple[bool, str]:
         """Send a test notification to verify configuration."""
-        title = "BambuTrack Test"
-        message = "This is a test notification from BambuTrack. If you see this, notifications are working correctly!"
+        lang = "en"
+        if db:
+            lang = await self._get_notification_language(db)
+        translator = Translator(lang)
+
+        title = translator.t("notification.test_title")
+        message = translator.t("notification.test_message")
 
         try:
             if provider_type == "callmebot":
@@ -434,8 +461,10 @@ class NotificationService:
             logger.info(f"No notification providers configured for print_start event on printer {printer_id}")
             return
 
+        lang = await self._get_notification_language(db)
+        translator = Translator(lang)
         logger.info(f"Found {len(providers)} providers for print_start: {[p.name for p in providers]}")
-        title, message = self._build_print_start_message(printer_name, data)
+        title, message = self._build_print_start_message(printer_name, data, translator)
         await self._send_to_providers(providers, title, message, db)
 
     async def on_print_complete(
@@ -466,8 +495,10 @@ class NotificationService:
             logger.info(f"No notification providers configured for {event_field} event on printer {printer_id}")
             return
 
+        lang = await self._get_notification_language(db)
+        translator = Translator(lang)
         logger.info(f"Found {len(providers)} providers for {event_field}: {[p.name for p in providers]}")
-        title, message = self._build_print_complete_message(printer_name, status, data, archive_data)
+        title, message = self._build_print_complete_message(printer_name, status, data, translator, archive_data)
         await self._send_to_providers(providers, title, message, db)
 
     async def on_print_progress(
@@ -483,7 +514,9 @@ class NotificationService:
         if not providers:
             return
 
-        title, message = self._build_progress_message(printer_name, filename, progress)
+        lang = await self._get_notification_language(db)
+        translator = Translator(lang)
+        title, message = self._build_progress_message(printer_name, filename, progress, translator)
         await self._send_to_providers(providers, title, message, db)
 
     async def on_printer_offline(
@@ -494,7 +527,9 @@ class NotificationService:
         if not providers:
             return
 
-        title, message = self._build_printer_offline_message(printer_name)
+        lang = await self._get_notification_language(db)
+        translator = Translator(lang)
+        title, message = self._build_printer_offline_message(printer_name, translator)
         await self._send_to_providers(providers, title, message, db)
 
     async def on_printer_error(
@@ -510,7 +545,9 @@ class NotificationService:
         if not providers:
             return
 
-        title, message = self._build_printer_error_message(printer_name, error_type, error_detail)
+        lang = await self._get_notification_language(db)
+        translator = Translator(lang)
+        title, message = self._build_printer_error_message(printer_name, error_type, translator, error_detail)
         await self._send_to_providers(providers, title, message, db)
 
     async def on_filament_low(
@@ -526,7 +563,31 @@ class NotificationService:
         if not providers:
             return
 
-        title, message = self._build_filament_low_message(printer_name, slot, remaining_percent)
+        lang = await self._get_notification_language(db)
+        translator = Translator(lang)
+        title, message = self._build_filament_low_message(printer_name, slot, remaining_percent, translator)
+        await self._send_to_providers(providers, title, message, db)
+
+    async def on_maintenance_due(
+        self,
+        printer_id: int,
+        printer_name: str,
+        maintenance_items: list[dict],
+        db: AsyncSession,
+    ):
+        """Handle maintenance due event - sends notification when maintenance is due or warning."""
+        if not maintenance_items:
+            return
+
+        providers = await self._get_providers_for_event(db, "on_maintenance_due", printer_id)
+        if not providers:
+            logger.info(f"No notification providers configured for maintenance_due event on printer {printer_id}")
+            return
+
+        lang = await self._get_notification_language(db)
+        translator = Translator(lang)
+        logger.info(f"Found {len(providers)} providers for maintenance_due: {[p.name for p in providers]}")
+        title, message = self._build_maintenance_due_message(printer_name, maintenance_items, translator)
         await self._send_to_providers(providers, title, message, db)
 
 

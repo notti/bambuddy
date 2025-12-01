@@ -9,7 +9,7 @@ from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI
 
 # Import settings first for logging configuration
-from backend.app.core.config import settings as app_settings
+from backend.app.core.config import settings as app_settings, APP_VERSION
 
 # Configure logging based on settings
 # DEBUG=true -> DEBUG level, else use LOG_LEVEL setting
@@ -54,7 +54,7 @@ from fastapi.responses import FileResponse
 from backend.app.core.database import init_db, async_session
 from sqlalchemy import select, or_
 from backend.app.core.websocket import ws_manager
-from backend.app.api.routes import printers, archives, websocket, filaments, cloud, smart_plugs, print_queue, kprofiles, notifications
+from backend.app.api.routes import printers, archives, websocket, filaments, cloud, smart_plugs, print_queue, kprofiles, notifications, spoolman, updates, maintenance
 from backend.app.api.routes import settings as settings_routes
 from backend.app.services.notification_service import notification_service
 from backend.app.services.printer_manager import (
@@ -69,6 +69,8 @@ from backend.app.services.bambu_ftp import download_file_async
 from backend.app.services.smart_plug_manager import smart_plug_manager
 from backend.app.services.tasmota import tasmota_service
 from backend.app.models.smart_plug import SmartPlug
+from backend.app.services.spoolman import get_spoolman_client, init_spoolman_client, close_spoolman_client
+from backend.app.api.routes.maintenance import _get_printer_maintenance_internal, ensure_default_types
 
 
 # Track active prints: {(printer_id, filename): archive_id}
@@ -98,6 +100,92 @@ def register_expected_print(printer_id: int, filename: str, archive_id: int):
 
 _last_status_broadcast: dict[int, str] = {}
 _nozzle_count_updated: set[int] = set()  # Track printers where we've updated nozzle_count
+
+
+async def _report_spoolman_usage(printer_id: int, archive_id: int, logger):
+    """Report filament usage to Spoolman after print completion.
+
+    This finds the spool by RFID tag_uid from current AMS state and reports
+    the filament_used_grams from the archive metadata.
+    """
+    async with async_session() as db:
+        from backend.app.api.routes.settings import get_setting
+        from backend.app.models.archive import PrintArchive
+
+        # Check if Spoolman is enabled
+        spoolman_enabled = await get_setting(db, "spoolman_enabled")
+        if not spoolman_enabled or spoolman_enabled.lower() != "true":
+            return
+
+        # Get Spoolman URL
+        spoolman_url = await get_setting(db, "spoolman_url")
+        if not spoolman_url:
+            return
+
+        # Get or create Spoolman client
+        client = await get_spoolman_client()
+        if not client:
+            client = await init_spoolman_client(spoolman_url)
+
+        # Check if Spoolman is reachable
+        if not await client.health_check():
+            logger.warning(f"Spoolman not reachable for usage reporting")
+            return
+
+        # Get archive to find filament usage
+        result = await db.execute(
+            select(PrintArchive).where(PrintArchive.id == archive_id)
+        )
+        archive = result.scalar_one_or_none()
+        if not archive or not archive.filament_used_grams:
+            logger.debug(f"No filament usage data for archive {archive_id}")
+            return
+
+        filament_used = archive.filament_used_grams
+        logger.info(f"[SPOOLMAN] Archive {archive_id} used {filament_used}g of filament")
+
+        # Get current AMS state from printer to find the active spool
+        state = printer_manager.get_status(printer_id)
+        if not state or not state.raw_data:
+            logger.debug(f"No printer state available for usage reporting")
+            return
+
+        ams_data = state.raw_data.get("ams")
+        if not ams_data:
+            logger.debug(f"No AMS data available for usage reporting")
+            return
+
+        # Find spools with RFID tags in Spoolman and report usage
+        # For now, we report usage to the first spool found with a matching tag
+        # TODO: In future, track which specific trays were used during the print
+        spools_updated = 0
+        for ams_unit in ams_data:
+            ams_id = int(ams_unit.get("id", 0))
+            trays = ams_unit.get("tray", [])
+
+            for tray_data in trays:
+                tag_uid = tray_data.get("tag_uid")
+                if not tag_uid:
+                    continue
+
+                # Find spool in Spoolman by tag
+                spool = await client.find_spool_by_tag(tag_uid)
+                if spool:
+                    # Report usage to Spoolman
+                    result = await client.use_spool(spool["id"], filament_used)
+                    if result:
+                        logger.info(
+                            f"[SPOOLMAN] Reported {filament_used}g usage to spool {spool['id']} "
+                            f"(tag: {tag_uid})"
+                        )
+                        spools_updated += 1
+                        # Only report to one spool for single-material prints
+                        # Multi-material prints would need more sophisticated tracking
+                        return
+
+        if spools_updated == 0:
+            logger.debug(f"No matching Spoolman spools found for printer {printer_id}")
+
 
 async def on_printer_status_change(printer_id: int, state: PrinterState):
     """Handle printer status changes - broadcast via WebSocket."""
@@ -139,6 +227,74 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
         printer_id,
         printer_state_to_dict(state, printer_id),
     )
+
+
+async def on_ams_change(printer_id: int, ams_data: list):
+    """Handle AMS data changes - sync to Spoolman if enabled and auto mode."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        async with async_session() as db:
+            from backend.app.api.routes.settings import get_setting
+            from backend.app.models.printer import Printer
+
+            # Check if Spoolman is enabled
+            spoolman_enabled = await get_setting(db, "spoolman_enabled")
+            if not spoolman_enabled or spoolman_enabled.lower() != "true":
+                return
+
+            # Check sync mode
+            sync_mode = await get_setting(db, "spoolman_sync_mode")
+            if sync_mode and sync_mode != "auto":
+                return  # Only sync on auto mode
+
+            # Get Spoolman URL
+            spoolman_url = await get_setting(db, "spoolman_url")
+            if not spoolman_url:
+                return
+
+            # Get or create Spoolman client
+            client = await get_spoolman_client()
+            if not client:
+                client = await init_spoolman_client(spoolman_url)
+
+            # Check if Spoolman is reachable
+            if not await client.health_check():
+                logger.warning(f"Spoolman not reachable at {spoolman_url}")
+                return
+
+            # Get printer name for location
+            result = await db.execute(
+                select(Printer).where(Printer.id == printer_id)
+            )
+            printer = result.scalar_one_or_none()
+            printer_name = printer.name if printer else f"Printer {printer_id}"
+
+            # Sync each AMS tray
+            synced = 0
+            for ams_unit in ams_data:
+                ams_id = int(ams_unit.get("id", 0))
+                trays = ams_unit.get("tray", [])
+
+                for tray_data in trays:
+                    tray = client.parse_ams_tray(ams_id, tray_data)
+                    if not tray:
+                        continue  # Empty tray
+
+                    try:
+                        result = await client.sync_ams_tray(tray, printer_name)
+                        if result:
+                            synced += 1
+                    except Exception as e:
+                        logger.error(f"Error syncing AMS {ams_id} tray {tray.tray_id}: {e}")
+
+            if synced > 0:
+                logger.info(f"Auto-synced {synced} AMS trays to Spoolman for printer {printer_id}")
+
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Spoolman AMS sync failed: {e}")
 
 
 async def on_print_start(printer_id: int, data: dict):
@@ -570,6 +726,13 @@ async def on_print_complete(printer_id: int, data: dict):
             "status": status,
         })
 
+    # Report filament usage to Spoolman if print completed successfully
+    if data.get("status") == "completed":
+        try:
+            await _report_spoolman_usage(printer_id, archive_id, logger)
+        except Exception as e:
+            logger.warning(f"Spoolman usage reporting failed: {e}")
+
     # Calculate energy used for this print (always per-print: end - start)
     try:
         starting_kwh = _print_energy_start.pop(archive_id, None)
@@ -702,6 +865,46 @@ async def on_print_complete(printer_id: int, data: dict):
         import logging
         logging.getLogger(__name__).warning(f"Notification on_print_complete failed: {e}")
 
+    # Check for maintenance due and send notifications (only for completed prints)
+    if data.get("status") == "completed":
+        try:
+            async with async_session() as db:
+                from backend.app.models.printer import Printer
+
+                # Get printer name
+                result = await db.execute(
+                    select(Printer).where(Printer.id == printer_id)
+                )
+                printer = result.scalar_one_or_none()
+                printer_name = printer.name if printer else f"Printer {printer_id}"
+
+                # Get maintenance overview for this printer
+                await ensure_default_types(db)
+                overview = await _get_printer_maintenance_internal(printer_id, db, commit=True)
+
+                # Check for any items that are due or have warnings
+                items_needing_attention = [
+                    {
+                        "name": item.maintenance_type_name,
+                        "is_due": item.is_due,
+                        "is_warning": item.is_warning,
+                    }
+                    for item in overview.maintenance_items
+                    if item.enabled and (item.is_due or item.is_warning)
+                ]
+
+                if items_needing_attention:
+                    await notification_service.on_maintenance_due(
+                        printer_id, printer_name, items_needing_attention, db
+                    )
+                    logger.info(
+                        f"Sent maintenance notification for printer {printer_id}: "
+                        f"{len(items_needing_attention)} items need attention"
+                    )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Maintenance notification check failed: {e}")
+
     # Update queue item if this was a scheduled print
     try:
         async with async_session() as db:
@@ -765,10 +968,27 @@ async def lifespan(app: FastAPI):
     printer_manager.set_status_change_callback(on_printer_status_change)
     printer_manager.set_print_start_callback(on_print_start)
     printer_manager.set_print_complete_callback(on_print_complete)
+    printer_manager.set_ams_change_callback(on_ams_change)
 
     # Connect to all active printers
     async with async_session() as db:
         await init_printer_connections(db)
+
+    # Auto-connect to Spoolman if enabled
+    async with async_session() as db:
+        from backend.app.api.routes.settings import get_setting
+        spoolman_enabled = await get_setting(db, "spoolman_enabled")
+        spoolman_url = await get_setting(db, "spoolman_url")
+
+        if spoolman_enabled and spoolman_enabled.lower() == "true" and spoolman_url:
+            try:
+                client = await init_spoolman_client(spoolman_url)
+                if await client.health_check():
+                    logging.info(f"Auto-connected to Spoolman at {spoolman_url}")
+                else:
+                    logging.warning(f"Spoolman at {spoolman_url} is not reachable")
+            except Exception as e:
+                logging.warning(f"Failed to auto-connect to Spoolman: {e}")
 
     # Start the print scheduler
     asyncio.create_task(print_scheduler.run())
@@ -778,12 +998,13 @@ async def lifespan(app: FastAPI):
     # Shutdown
     print_scheduler.stop()
     printer_manager.disconnect_all()
+    await close_spoolman_client()
 
 
 app = FastAPI(
     title=app_settings.app_name,
     description="Archive and manage Bambu Lab 3MF files",
-    version="0.1.2",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -797,6 +1018,9 @@ app.include_router(smart_plugs.router, prefix=app_settings.api_prefix)
 app.include_router(print_queue.router, prefix=app_settings.api_prefix)
 app.include_router(kprofiles.router, prefix=app_settings.api_prefix)
 app.include_router(notifications.router, prefix=app_settings.api_prefix)
+app.include_router(spoolman.router, prefix=app_settings.api_prefix)
+app.include_router(updates.router, prefix=app_settings.api_prefix)
+app.include_router(maintenance.router, prefix=app_settings.api_prefix)
 app.include_router(websocket.router, prefix=app_settings.api_prefix)
 
 

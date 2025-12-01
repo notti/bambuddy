@@ -78,6 +78,7 @@ class BambuMQTTClient:
         on_state_change: Callable[[PrinterState], None] | None = None,
         on_print_start: Callable[[dict], None] | None = None,
         on_print_complete: Callable[[dict], None] | None = None,
+        on_ams_change: Callable[[list], None] | None = None,
     ):
         self.ip_address = ip_address
         self.serial_number = serial_number
@@ -85,6 +86,7 @@ class BambuMQTTClient:
         self.on_state_change = on_state_change
         self.on_print_start = on_print_start
         self.on_print_complete = on_print_complete
+        self.on_ams_change = on_ams_change
 
         self.state = PrinterState()
         self._client: mqtt.Client | None = None
@@ -96,6 +98,7 @@ class BambuMQTTClient:
         self._message_log: deque[MQTTLogEntry] = deque(maxlen=100)
         self._logging_enabled: bool = False
         self._last_message_time: float = 0.0  # Track when we last received a message
+        self._previous_ams_hash: str | None = None  # Track AMS changes
 
         # K-profile command tracking
         self._sequence_id: int = 0
@@ -157,6 +160,14 @@ class BambuMQTTClient:
 
     def _process_message(self, payload: dict):
         """Process incoming MQTT message from printer."""
+        # Handle top-level AMS data (comes outside of "print" key)
+        # Wrap in try/except to prevent breaking the MQTT connection
+        if "ams" in payload:
+            try:
+                self._handle_ams_data(payload["ams"])
+            except Exception as e:
+                logger.error(f"[{self.serial_number}] Error handling AMS data: {e}")
+
         if "print" in payload:
             print_data = payload["print"]
             # Log when we see gcode_state changes
@@ -167,10 +178,44 @@ class BambuMQTTClient:
                 )
 
             # Check for K-profile response (extrusion_cali)
+            if "command" in print_data:
+                logger.debug(f"[{self.serial_number}] Received command response: {print_data.get('command')}")
             if "command" in print_data and print_data.get("command") == "extrusion_cali_get":
                 self._handle_kprofile_response(print_data)
 
             self._update_state(print_data)
+
+    def _handle_ams_data(self, ams_data: list):
+        """Handle AMS data changes for Spoolman integration.
+
+        This is called when we receive top-level AMS data in MQTT messages.
+        It detects changes and triggers the callback for Spoolman sync.
+        """
+        import hashlib
+
+        # Store AMS data in raw_data so it's accessible via API
+        if "ams" not in self.state.raw_data:
+            self.state.raw_data["ams"] = ams_data
+        else:
+            self.state.raw_data["ams"] = ams_data
+
+        # Create a hash of relevant AMS data to detect changes
+        ams_hash_data = []
+        for ams_unit in ams_data:
+            for tray in ams_unit.get("tray", []):
+                # Include fields that matter for filament tracking
+                ams_hash_data.append(
+                    f"{ams_unit.get('id')}:{tray.get('id')}:"
+                    f"{tray.get('tray_type')}:{tray.get('tag_uid')}:{tray.get('remain')}"
+                )
+        ams_hash = hashlib.md5(":".join(ams_hash_data).encode()).hexdigest()
+
+        # Only trigger callback if AMS data actually changed
+        if ams_hash != self._previous_ams_hash:
+            self._previous_ams_hash = ams_hash
+            if self.on_ams_change:
+                logger.info(f"[{self.serial_number}] AMS data changed, triggering sync callback")
+                self.on_ams_change(ams_data)
 
     def _update_state(self, data: dict):
         """Update printer state from message data."""
@@ -259,7 +304,11 @@ class BambuMQTTClient:
                             severity=severity if severity > 0 else 3,
                         ))
 
+        # Preserve AMS data when updating raw_data (AMS comes at top level, not in print)
+        ams_data = self.state.raw_data.get("ams")
         self.state.raw_data = data
+        if ams_data is not None:
+            self.state.raw_data["ams"] = ams_data
 
         # Log state transitions for debugging
         if "gcode_state" in data:
@@ -363,8 +412,14 @@ class BambuMQTTClient:
             message = {"pushing": {"command": "pushall"}}
             self._client.publish(self.topic_publish, json.dumps(message))
 
-    def connect(self):
-        """Connect to the printer MQTT broker."""
+    def connect(self, loop: asyncio.AbstractEventLoop | None = None):
+        """Connect to the printer MQTT broker.
+
+        Args:
+            loop: The asyncio event loop to use for thread-safe callbacks.
+                  If not provided, will try to get the running loop.
+        """
+        self._loop = loop
         self._client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             client_id=f"bambutrack_{self.serial_number}",
@@ -503,12 +558,17 @@ class BambuMQTTClient:
         self._kprofile_response_data = profiles
 
         # Signal that we received the response
+        # Use thread-safe method since MQTT callbacks run in a different thread
         if self._pending_kprofile_response:
-            self._pending_kprofile_response.set()
+            if self._loop and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._pending_kprofile_response.set)
+            else:
+                # Fallback for when loop is not available
+                self._pending_kprofile_response.set()
 
         logger.info(f"[{self.serial_number}] Received {len(profiles)} K-profiles")
 
-    async def get_kprofiles(self, nozzle_diameter: str = "0.4", timeout: float = 5.0) -> list[KProfile]:
+    async def get_kprofiles(self, nozzle_diameter: str = "0.4", timeout: float = 10.0) -> list[KProfile]:
         """Request K-profiles from the printer.
 
         Args:
@@ -520,6 +580,13 @@ class BambuMQTTClient:
         """
         if not self._client or not self.state.connected:
             logger.warning(f"[{self.serial_number}] Cannot get K-profiles: not connected")
+            return []
+
+        # Capture current event loop for thread-safe callback
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(f"[{self.serial_number}] No running event loop")
             return []
 
         # Set up response event
