@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Save, Loader2, Check, Plus, Plug, AlertTriangle, RotateCcw, Bell, Download, RefreshCw, ExternalLink } from 'lucide-react';
+import { Save, Loader2, Check, Plus, Plug, AlertTriangle, RotateCcw, Bell, Download, RefreshCw, ExternalLink, Globe } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { api } from '../api/client';
 import type { AppSettings, SmartPlug, NotificationProvider, UpdateStatus } from '../api/client';
 import { Card, CardContent, CardHeader } from '../components/Card';
@@ -10,10 +11,12 @@ import { NotificationProviderCard } from '../components/NotificationProviderCard
 import { AddNotificationModal } from '../components/AddNotificationModal';
 import { SpoolmanSettings } from '../components/SpoolmanSettings';
 import { defaultNavItems, getDefaultView, setDefaultView } from '../components/Layout';
+import { availableLanguages } from '../i18n';
 import { useState, useEffect } from 'react';
 
 export function SettingsPage() {
   const queryClient = useQueryClient();
+  const { t, i18n } = useTranslation();
   const [localSettings, setLocalSettings] = useState<AppSettings | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
@@ -102,7 +105,8 @@ export function SettingsPage() {
         settings.currency !== localSettings.currency ||
         settings.energy_cost_per_kwh !== localSettings.energy_cost_per_kwh ||
         settings.energy_tracking_mode !== localSettings.energy_tracking_mode ||
-        settings.check_updates !== localSettings.check_updates;
+        settings.check_updates !== localSettings.check_updates ||
+        settings.notification_language !== localSettings.notification_language;
       setHasChanges(changed);
     }
   }, [settings, localSettings]);
@@ -318,12 +322,32 @@ export function SettingsPage() {
 
           <Card>
             <CardHeader>
-              <h2 className="text-lg font-semibold text-white">Interface</h2>
+              <h2 className="text-lg font-semibold text-white">{t('settings.general')}</h2>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
                 <label className="block text-sm text-bambu-gray mb-1">
-                  Default view on startup
+                  <Globe className="w-4 h-4 inline mr-1" />
+                  {t('settings.language')}
+                </label>
+                <select
+                  value={i18n.language}
+                  onChange={(e) => i18n.changeLanguage(e.target.value)}
+                  className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+                >
+                  {availableLanguages.map((lang) => (
+                    <option key={lang.code} value={lang.code}>
+                      {lang.nativeName} ({lang.name})
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-bambu-gray mt-1">
+                  {t('settings.languageDescription')}
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm text-bambu-gray mb-1">
+                  {t('settings.defaultView')}
                 </label>
                 <select
                   value={defaultView}
@@ -332,12 +356,12 @@ export function SettingsPage() {
                 >
                   {defaultNavItems.map((item) => (
                     <option key={item.id} value={item.to}>
-                      {item.label}
+                      {t(item.labelKey)}
                     </option>
                   ))}
                 </select>
                 <p className="text-xs text-bambu-gray mt-1">
-                  Page to show when opening the app
+                  {t('settings.defaultViewDescription')}
                 </p>
               </div>
               <div className="flex items-center justify-between">
@@ -565,6 +589,26 @@ export function SettingsPage() {
               <p className="text-sm text-bambu-gray mb-4">
                 Get notified about print events via WhatsApp, Telegram, Email, and more.
               </p>
+
+              {/* Notification Language */}
+              <div className="flex items-center justify-between py-3 border-b border-bambu-dark-tertiary mb-4">
+                <div>
+                  <p className="text-white">{t('settings.notificationLanguage')}</p>
+                  <p className="text-sm text-bambu-gray">{t('settings.notificationLanguageDescription')}</p>
+                </div>
+                <select
+                  value={localSettings.notification_language || 'en'}
+                  onChange={(e) => updateSetting('notification_language', e.target.value)}
+                  className="px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-bambu-green"
+                >
+                  {availableLanguages.map((lang) => (
+                    <option key={lang.code} value={lang.code}>
+                      {lang.nativeName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {providersLoading ? (
                 <div className="flex justify-center py-8">
                   <Loader2 className="w-6 h-6 text-bambu-green animate-spin" />

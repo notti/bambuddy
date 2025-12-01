@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Printer, Archive, Calendar, BarChart3, Cloud, Settings, Sun, Moon, ChevronLeft, ChevronRight, Keyboard, Github, GripVertical, ArrowUpCircle, Wrench, type LucideIcon } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/ThemeContext';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import { useQuery } from '@tanstack/react-query';
@@ -10,17 +11,17 @@ interface NavItem {
   id: string;
   to: string;
   icon: LucideIcon;
-  label: string;
+  labelKey: string; // Translation key
 }
 
 export const defaultNavItems: NavItem[] = [
-  { id: 'printers', to: '/', icon: Printer, label: 'Printers' },
-  { id: 'archives', to: '/archives', icon: Archive, label: 'Archives' },
-  { id: 'queue', to: '/queue', icon: Calendar, label: 'Queue' },
-  { id: 'stats', to: '/stats', icon: BarChart3, label: 'Statistics' },
-  { id: 'profiles', to: '/profiles', icon: Cloud, label: 'Profiles' },
-  { id: 'maintenance', to: '/maintenance', icon: Wrench, label: 'Maintenance' },
-  { id: 'settings', to: '/settings', icon: Settings, label: 'Settings' },
+  { id: 'printers', to: '/', icon: Printer, labelKey: 'nav.printers' },
+  { id: 'archives', to: '/archives', icon: Archive, labelKey: 'nav.archives' },
+  { id: 'queue', to: '/queue', icon: Calendar, labelKey: 'nav.queue' },
+  { id: 'stats', to: '/stats', icon: BarChart3, labelKey: 'nav.stats' },
+  { id: 'profiles', to: '/profiles', icon: Cloud, labelKey: 'nav.profiles' },
+  { id: 'maintenance', to: '/maintenance', icon: Wrench, labelKey: 'nav.maintenance' },
+  { id: 'settings', to: '/settings', icon: Settings, labelKey: 'nav.settings' },
 ];
 
 // Get ordered nav items from localStorage
@@ -69,6 +70,7 @@ export function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { theme, toggleTheme } = useTheme();
+  const { t } = useTranslation();
   const [sidebarExpanded, setSidebarExpanded] = useState(() => {
     const stored = localStorage.getItem('sidebarExpanded');
     return stored !== 'false';
@@ -207,7 +209,7 @@ export function Layout() {
         {/* Navigation */}
         <nav className="flex-1 p-2">
           <ul className="space-y-2">
-            {navItems.map(({ id, to, icon: Icon, label }, index) => (
+            {navItems.map(({ id, to, icon: Icon, labelKey }, index) => (
               <li
                 key={id}
                 draggable
@@ -233,13 +235,13 @@ export function Layout() {
                         : 'text-bambu-gray-light hover:bg-bambu-dark-tertiary hover:text-white'
                     }`
                   }
-                  title={!sidebarExpanded ? label : undefined}
+                  title={!sidebarExpanded ? t(labelKey) : undefined}
                 >
                   {sidebarExpanded && (
                     <GripVertical className="w-4 h-4 flex-shrink-0 opacity-0 group-hover:opacity-50 cursor-grab active:cursor-grabbing -ml-1" />
                   )}
                   <Icon className="w-5 h-5 flex-shrink-0" />
-                  {sidebarExpanded && <span>{label}</span>}
+                  {sidebarExpanded && <span>{t(labelKey)}</span>}
                 </NavLink>
               </li>
             ))}
@@ -250,7 +252,7 @@ export function Layout() {
         <button
           onClick={() => setSidebarExpanded(!sidebarExpanded)}
           className="p-2 mx-2 mb-2 rounded-lg hover:bg-bambu-dark-tertiary transition-colors text-bambu-gray-light hover:text-white flex items-center justify-center"
-          title={sidebarExpanded ? 'Collapse sidebar' : 'Expand sidebar'}
+          title={sidebarExpanded ? t('nav.collapseSidebar') : t('nav.expandSidebar')}
         >
           {sidebarExpanded ? (
             <ChevronLeft className="w-5 h-5" />
@@ -269,10 +271,10 @@ export function Layout() {
                   <button
                     onClick={() => navigate('/settings')}
                     className="flex items-center gap-1 text-xs text-bambu-green hover:text-bambu-green/80 transition-colors"
-                    title={`Update available: v${updateCheck.latest_version}`}
+                    title={t('nav.updateAvailable', { version: updateCheck.latest_version })}
                   >
                     <ArrowUpCircle className="w-4 h-4" />
-                    <span>Update</span>
+                    <span>{t('nav.update')}</span>
                   </button>
                 )}
               </div>
@@ -282,21 +284,21 @@ export function Layout() {
                   target="_blank"
                   rel="noopener noreferrer"
                   className="p-2 rounded-lg hover:bg-bambu-dark-tertiary transition-colors text-bambu-gray-light hover:text-white"
-                  title="View on GitHub"
+                  title={t('nav.viewOnGithub')}
                 >
                   <Github className="w-5 h-5" />
                 </a>
                 <button
                   onClick={() => setShowShortcuts(true)}
                   className="p-2 rounded-lg hover:bg-bambu-dark-tertiary transition-colors text-bambu-gray-light hover:text-white"
-                  title="Keyboard shortcuts (?)"
+                  title={t('nav.keyboardShortcuts')}
                 >
                   <Keyboard className="w-5 h-5" />
                 </button>
                 <button
                   onClick={toggleTheme}
                   className="p-2 rounded-lg hover:bg-bambu-dark-tertiary transition-colors text-bambu-gray-light hover:text-white"
-                  title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                  title={theme === 'dark' ? t('nav.switchToLight') : t('nav.switchToDark')}
                 >
                   {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
                 </button>
@@ -308,7 +310,7 @@ export function Layout() {
                 <button
                   onClick={() => navigate('/settings')}
                   className="p-2 rounded-lg hover:bg-bambu-dark-tertiary transition-colors text-bambu-green hover:text-bambu-green/80"
-                  title={`Update available: v${updateCheck.latest_version}`}
+                  title={t('nav.updateAvailable', { version: updateCheck.latest_version })}
                 >
                   <ArrowUpCircle className="w-5 h-5" />
                 </button>
@@ -318,21 +320,21 @@ export function Layout() {
                 target="_blank"
                 rel="noopener noreferrer"
                 className="p-2 rounded-lg hover:bg-bambu-dark-tertiary transition-colors text-bambu-gray-light hover:text-white"
-                title="View on GitHub"
+                title={t('nav.viewOnGithub')}
               >
                 <Github className="w-5 h-5" />
               </a>
               <button
                 onClick={() => setShowShortcuts(true)}
                 className="p-2 rounded-lg hover:bg-bambu-dark-tertiary transition-colors text-bambu-gray-light hover:text-white"
-                title="Keyboard shortcuts (?)"
+                title={t('nav.keyboardShortcuts')}
               >
                 <Keyboard className="w-5 h-5" />
               </button>
               <button
                 onClick={toggleTheme}
                 className="p-2 rounded-lg hover:bg-bambu-dark-tertiary transition-colors text-bambu-gray-light hover:text-white"
-                title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                title={theme === 'dark' ? t('nav.switchToLight') : t('nav.switchToDark')}
               >
                 {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
               </button>

@@ -20,6 +20,9 @@ class AppSettings(BaseModel):
     # Updates
     check_updates: bool = Field(default=True, description="Automatically check for updates on startup")
 
+    # Language
+    notification_language: str = Field(default="en", description="Language for push notifications (en, de)")
+
 
 class AppSettingsUpdate(BaseModel):
     """Schema for updating settings (all fields optional)."""
@@ -35,3 +38,4 @@ class AppSettingsUpdate(BaseModel):
     spoolman_url: str | None = None
     spoolman_sync_mode: str | None = None
     check_updates: bool | None = None
+    notification_language: str | None = None

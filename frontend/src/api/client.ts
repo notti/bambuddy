@@ -154,6 +154,7 @@ export interface AppSettings {
   energy_cost_per_kwh: number;
   energy_tracking_mode: 'print' | 'total';
   check_updates: boolean;
+  notification_language: string;
 }
 
 export type AppSettingsUpdate = Partial<AppSettings>;
