@@ -104,21 +104,21 @@ export function CameraFeed({ printerId, isConnected }: CameraFeedProps) {
           <div className="absolute top-2 right-2 flex gap-2">
             <button
               onClick={handleRefresh}
-              className="p-2 rounded bg-black/50 hover:bg-black/70 text-white transition-colors"
+              className="p-2 rounded bg-gray-500 hover:bg-gray-400 text-white transition-colors shadow-lg"
               title="Refresh stream"
             >
               <RefreshCw className="w-4 h-4" />
             </button>
             <button
               onClick={handleFullscreen}
-              className="p-2 rounded bg-black/50 hover:bg-black/70 text-white transition-colors"
+              className="p-2 rounded bg-gray-500 hover:bg-gray-400 text-white transition-colors shadow-lg"
               title="Fullscreen"
             >
               <Maximize2 className="w-4 h-4" />
             </button>
             <button
               onClick={handleToggleStream}
-              className="px-3 py-1.5 rounded bg-red-500/80 hover:bg-red-500 text-white text-sm transition-colors"
+              className="px-3 py-1.5 rounded bg-red-600 hover:bg-red-500 text-white text-sm transition-colors shadow-lg"
             >
               Stop
             </button>
