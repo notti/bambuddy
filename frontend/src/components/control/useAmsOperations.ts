@@ -67,6 +67,9 @@ interface UseAmsOperationsReturn {
   // For FilamentChangeCard - which type of operation
   isLoadOperation: boolean;
   loadTargetTrayId: number | null;
+  // Last initiated operation type - persists after state reset
+  // Used to determine card type when MQTT shows change but our state is IDLE
+  lastOperationType: 'load' | 'unload' | null;
 
   // Mutation error states (for UI feedback)
   loadError: Error | null;
@@ -88,6 +91,10 @@ export function useAmsOperations({
 }: UseAmsOperationsProps): UseAmsOperationsReturn {
   const [state, setState] = useState<OperationState>('IDLE');
   const [context, setContext] = useState<OperationContext | null>(null);
+  // Track the last operation type (load vs unload) - persists after state reset
+  // This helps show correct card type when MQTT shows filament change but our state is IDLE
+  // Using state instead of ref so changes trigger re-renders in consuming components
+  const [lastOperationType, setLastOperationType] = useState<'load' | 'unload' | null>(null);
 
   // Track previous values for transition detection
   const prevAmsStatusMainRef = useRef(amsStatusMain);
@@ -210,6 +217,7 @@ export function useAmsOperations({
     const startTime = Date.now();
     setState('LOADING');
     setContext({ loadTargetTrayId: trayId, startTime });
+    setLastOperationType('load'); // Remember this was a load operation
 
     // Set timeout
     timeoutRef.current = setTimeout(() => {
@@ -231,6 +239,7 @@ export function useAmsOperations({
     const startTime = Date.now();
     setState('UNLOADING');
     setContext({ startTime });
+    setLastOperationType('unload'); // Remember this was an unload operation
 
     // Set timeout
     timeoutRef.current = setTimeout(() => {
@@ -306,11 +315,14 @@ export function useAmsOperations({
   }, [state, amsStatusMain, reset]);
 
   // Secondary completion detection for LOAD: tray_now matches target
+  // Wait at least 5 seconds to ensure the filament actually reached the nozzle
+  // (tray_now can be updated before the physical load is complete)
   useEffect(() => {
     if (state !== 'LOADING' || !context?.loadTargetTrayId) return;
 
-    if (trayNow === context.loadTargetTrayId) {
-      console.log(`[useAmsOperations] Load complete: tray_now=${trayNow} matches target`);
+    const elapsed = context?.startTime ? Date.now() - context.startTime : 0;
+    if (trayNow === context.loadTargetTrayId && elapsed > 5000) {
+      console.log(`[useAmsOperations] Load complete: tray_now=${trayNow} matches target (${elapsed}ms elapsed)`);
       reset();
     }
   }, [state, context, trayNow, reset]);
@@ -357,6 +369,7 @@ export function useAmsOperations({
     isRefreshingSlot,
     isLoadOperation,
     loadTargetTrayId,
+    lastOperationType,
     loadError: loadMutation.error,
     unloadError: unloadMutation.error,
     refreshError: refreshMutation.error,

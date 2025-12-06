@@ -283,6 +283,10 @@ def printer_state_to_dict(state: PrinterState, printer_id: int | None = None) ->
             {"code": e.code, "attr": e.attr, "module": e.module, "severity": e.severity}
             for e in (state.hms_errors or [])
         ],
+        # AMS status for filament change tracking
+        "ams_status_main": state.ams_status_main,
+        "ams_status_sub": state.ams_status_sub,
+        "tray_now": state.tray_now,
     }
     # Add cover URL if there's an active print and printer_id is provided
     if printer_id and state.state == "RUNNING" and state.gcode_file:

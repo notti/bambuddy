@@ -151,6 +151,7 @@ interface FilamentChangeCardProps {
   targetTrayId: number | null;  // Target tray we're trying to load (null for unload)
   onComplete: () => void;  // Called when operation completes
   onRetry?: () => void;
+  operationInitiated: boolean;  // True if we initiated the operation (hook is in LOADING/UNLOADING state)
 }
 
 interface StepInfo {
@@ -159,7 +160,7 @@ interface StepInfo {
   stepNumber: number;
 }
 
-function FilamentChangeCard({ isLoading, amsStatusMain, amsStatusSub, trayNow, targetTrayId, onComplete, onRetry }: FilamentChangeCardProps) {
+function FilamentChangeCard({ isLoading, amsStatusMain, amsStatusSub, trayNow, targetTrayId, onComplete, onRetry, operationInitiated }: FilamentChangeCardProps) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
   const prevAmsStatusRef = useRef(amsStatusMain);
@@ -167,24 +168,31 @@ function FilamentChangeCard({ isLoading, amsStatusMain, amsStatusSub, trayNow, t
   const completionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // ams_status_sub values for filament change steps
-  // Observed progression: 5 -> 6 -> 2 -> 7 -> 0
+  // Observed from H2D printer logs:
+  // Load progression: 9 (feeding start) -> 5 (prep) -> 6 (pushing) -> 2 (heating) -> 6 (more pushing) -> 7 (purging)
+  // Unload progression: 9 (start) -> 2 (heating) -> 3 (retract prep) -> 4 (retract)
   // 2: Heating nozzle
-  // 3: AMS feeding filament to hub
+  // 3: AMS feeding filament to hub / retract prep
   // 4: Retraction / extruder pulling filament
   // 5: Initial filament push / preparation
   // 6: Load verification / extruder pushing
   // 7: Purging
+  // 9: Feeding start / operation initiated
   const SUB_HEATING = 2;
   const SUB_FEEDING = 3;
   const SUB_RETRACT = 4;
   const SUB_PUSH_PREP = 5;
   const SUB_PUSH = 6;
   const SUB_PURGE = 7;
+  const SUB_FEEDING_START = 9;
 
   // Log status updates for debugging
   useEffect(() => {
     console.log(`[FilamentChangeCard] Status: main=${amsStatusMain}, sub=${amsStatusSub}, trayNow=${trayNow}, isLoading=${isLoading}`);
   }, [amsStatusMain, amsStatusSub, trayNow, isLoading]);
+
+  // Track component mount time for minimum operation duration check
+  const mountTimeRef = useRef(Date.now());
 
   // Detect completion via ams_status_main transition from 1 (filament_change) to 0 (idle)
   // Also use tray_now as a secondary indicator
@@ -192,6 +200,15 @@ function FilamentChangeCard({ isLoading, amsStatusMain, amsStatusSub, trayNow, t
     const wasActive = prevAmsStatusRef.current === 1;
     const isNowIdle = amsStatusMain === 0;
     const trayChanged = trayNow !== prevTrayNowRef.current;
+    const elapsed = Date.now() - mountTimeRef.current;
+
+    // Don't detect completion in the first 3 seconds - operation can't complete that fast
+    // This prevents false positives from initial state or rapid updates
+    if (elapsed < 3000) {
+      prevAmsStatusRef.current = amsStatusMain;
+      prevTrayNowRef.current = trayNow;
+      return;
+    }
 
     // Primary completion detection: ams_status_main transitions from 1 to 0
     if (wasActive && isNowIdle) {
@@ -239,23 +256,29 @@ function FilamentChangeCard({ isLoading, amsStatusMain, amsStatusSub, trayNow, t
   const getStepFromAmsStatusSub = (): number => {
     if (isCompleted) return 99; // All done
 
-    // If not in filament change mode, not started
-    if (amsStatusMain !== 1) return 0;
+    // If not in filament change mode yet, check if we initiated the operation
+    // This handles the delay between sending the command and MQTT status updating
+    if (amsStatusMain !== 1) {
+      // If we initiated the operation, show step 1 as in progress
+      if (operationInitiated) return 1;
+      return 0; // Not started
+    }
 
     if (isLoading) {
       // Loading sequence: Push -> Heat -> Purge (matches Bambu Studio/OrcaSlicer display)
-      // Observed progression: 5 -> 6 -> 2 -> 7
-      // Map sub status to steps: 5/6 -> step 1, 2 -> step 2, 7 -> step 3
-      if (amsStatusSub === SUB_PUSH_PREP || amsStatusSub === SUB_PUSH || amsStatusSub === SUB_FEEDING) return 1; // Step 1: Pushing
+      // Observed progression: 9 (start) -> 5 (prep) -> 6 (push) -> 2 (heat) -> 6 (push) -> 7 (purge)
+      // Map sub status to steps: 9/5/6 -> step 1, 2 -> step 2, 7 -> step 3
+      if (amsStatusSub === SUB_FEEDING_START || amsStatusSub === SUB_PUSH_PREP || amsStatusSub === SUB_PUSH || amsStatusSub === SUB_FEEDING) return 1; // Step 1: Pushing
       if (amsStatusSub === SUB_HEATING) return 2; // Step 2: Heating
       if (amsStatusSub === SUB_PURGE) return 3; // Step 3: Purging
       // Default to step 1 when in filament_change mode
       return 1;
     } else {
       // Unloading sequence: Heat -> Retract
-      // Map sub status to steps: 2 -> step 1, 4 -> step 2
-      if (amsStatusSub === SUB_HEATING) return 1; // Step 1: Heating
-      if (amsStatusSub === SUB_RETRACT) return 2; // Step 2: Retracting
+      // Observed progression: 9 (start) -> 2 (heat) -> 3 (retract prep) -> 4 (retract)
+      // Map sub status to steps: 9/2 -> step 1, 3/4 -> step 2
+      if (amsStatusSub === SUB_FEEDING_START || amsStatusSub === SUB_HEATING) return 1; // Step 1: Heating
+      if (amsStatusSub === SUB_FEEDING || amsStatusSub === SUB_RETRACT) return 2; // Step 2: Retracting
       // Default to step 1 when in filament_change mode
       return 1;
     }
@@ -899,14 +922,13 @@ export function AMSSectionDual({ printerId, printerModel, status, nozzleCount }:
 
   // Distribute AMS units based on ams_extruder_map
   // Each AMS unit's info field tells us which extruder it's connected to:
-  // UI layout: Left panel shows extruder 0 AMS units, Right panel shows extruder 1 AMS units
-  // Note: Internal nozzle IDs are different (T0=right physical nozzle, T1=left physical nozzle)
+  // Bambu convention: extruder_id 0 = RIGHT physical nozzle, extruder_id 1 = LEFT physical nozzle
+  // UI layout: Left panel shows extruder 1 (left nozzle), Right panel shows extruder 0 (right nozzle)
   const leftUnits = (() => {
     if (!isDualNozzle) return amsUnits;
     if (Object.keys(amsExtruderMap).length > 0) {
-      // Filter AMS units assigned to extruder 0 (left UI panel)
-      // JSON keys are strings, so convert unit.id to string
-      return amsUnits.filter(unit => amsExtruderMap[String(unit.id)] === 0);
+      // Filter AMS units assigned to extruder 1 (LEFT physical nozzle -> left UI panel)
+      return amsUnits.filter(unit => amsExtruderMap[String(unit.id)] === 1);
     }
     // Fallback: even indices go to left
     return amsUnits.filter((_, i) => i % 2 === 0);
@@ -915,9 +937,8 @@ export function AMSSectionDual({ printerId, printerModel, status, nozzleCount }:
   const rightUnits = (() => {
     if (!isDualNozzle) return [];
     if (Object.keys(amsExtruderMap).length > 0) {
-      // Filter AMS units assigned to extruder 1 (right UI panel)
-      // JSON keys are strings, so convert unit.id to string
-      return amsUnits.filter(unit => amsExtruderMap[String(unit.id)] === 1);
+      // Filter AMS units assigned to extruder 0 (RIGHT physical nozzle -> right UI panel)
+      return amsUnits.filter(unit => amsExtruderMap[String(unit.id)] === 0);
     }
     // Fallback: odd indices go to right
     return amsUnits.filter((_, i) => i % 2 === 1);
@@ -1033,12 +1054,66 @@ export function AMSSectionDual({ printerId, printerModel, status, nozzleCount }:
   };
 
   // Show FilamentChangeCard when operation is in progress (LOADING or UNLOADING state)
+  // Use debounced visibility to prevent flickering when ams_status_main bounces
   const isMqttFilamentChangeActive = amsStatusMain === 1;
-  const showFilamentChangeCard = amsOps.state === 'LOADING' || amsOps.state === 'UNLOADING' || isMqttFilamentChangeActive;
+  const shouldShowCard = amsOps.state === 'LOADING' || amsOps.state === 'UNLOADING' || isMqttFilamentChangeActive;
 
-  // Get the loaded tray info for wire coloring
-  // Wire coloring should show the path from the currently loaded filament to the extruder
-  // But ONLY if the currently displayed AMS panel is the one with the loaded filament
+  // Debounce hiding the card - keep it visible for at least 2 seconds after conditions become false
+  const [showFilamentChangeCard, setShowFilamentChangeCard] = useState(false);
+  const hideTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    if (shouldShowCard) {
+      // Clear any pending hide timeout
+      if (hideTimeoutRef.current) {
+        clearTimeout(hideTimeoutRef.current);
+        hideTimeoutRef.current = null;
+      }
+      setShowFilamentChangeCard(true);
+    } else if (showFilamentChangeCard) {
+      // Delay hiding the card by 1.5 seconds to prevent flicker
+      if (!hideTimeoutRef.current) {
+        hideTimeoutRef.current = setTimeout(() => {
+          setShowFilamentChangeCard(false);
+          hideTimeoutRef.current = null;
+        }, 1500);
+      }
+    }
+
+    return () => {
+      if (hideTimeoutRef.current) {
+        clearTimeout(hideTimeoutRef.current);
+      }
+    };
+  }, [shouldShowCard, showFilamentChangeCard]);
+
+  // Determine if it's a load operation for the FilamentChangeCard
+  // Simple logic: use state if active, otherwise use lastOperationType
+  // - LOADING state -> definitely load
+  // - UNLOADING state -> definitely unload
+  // - IDLE state -> use lastOperationType to remember what we initiated
+  // - Fallback: if lastOperationType is null and MQTT shows activity, infer from tray_now
+  //   (tray_now=255 means unloading, any other value means loading)
+  const isFilamentLoadOperation = (() => {
+    if (amsOps.state === 'LOADING') return true;
+    if (amsOps.state === 'UNLOADING') return false;
+    if (amsOps.lastOperationType === 'load') return true;
+    if (amsOps.lastOperationType === 'unload') return false;
+    // Fallback: infer from tray_now when MQTT shows filament change active
+    // If tray has a valid filament (not 255), we're loading
+    return trayNow !== 255;
+  })();
+
+  // Debug logging for card type determination
+  useEffect(() => {
+    if (showFilamentChangeCard) {
+      console.log(`[AMSSectionDual] Card type: isFilamentLoadOperation=${isFilamentLoadOperation}, state=${amsOps.state}, lastOperationType=${amsOps.lastOperationType}, trayNow=${trayNow}`);
+    }
+  }, [showFilamentChangeCard, isFilamentLoadOperation, amsOps.state, amsOps.lastOperationType, trayNow]);
+
+  // Get the loaded tray info for wire coloring and extruder inlet
+  // Wire coloring: only show path if the currently displayed AMS panel has the loaded filament
+  // Extruder inlet: ALWAYS show the loaded filament color regardless of which AMS is displayed
   const getLoadedTrayInfo = (): {
     leftActiveSlot: number | null;
     rightActiveSlot: number | null;
@@ -1060,31 +1135,33 @@ export function AMSSectionDual({ printerId, printerModel, status, nozzleCount }:
         const color = tray?.tray_color ?? null;
 
         // Determine if this AMS is on left or right UI panel
-        // UI layout: extruder 0 = left panel, extruder 1 = right panel
+        // Bambu convention: extruder 0 = RIGHT physical nozzle, extruder 1 = LEFT physical nozzle
+        // UI layout: left panel shows extruder 1 (left nozzle), right panel shows extruder 0 (right nozzle)
         const extruderId = amsExtruderMap[String(unit.id)];
 
         // Check if this AMS unit is the one currently displayed in the panel
         const currentLeftUnit = leftUnits[leftAmsIndex];
         const currentRightUnit = rightUnits[rightAmsIndex];
 
-        if (extruderId === 0) {
-          // Left UI panel (extruder 0) - leftUnits filters for amsExtruderMap === 0
-          // Only show colored wiring if the currently displayed AMS unit is the one with loaded filament
+        if (extruderId === 1) {
+          // Left UI panel (extruder 1 = LEFT physical nozzle) - leftUnits filters for amsExtruderMap === 1
+          // Wire path: only show if the currently displayed AMS unit is the one with loaded filament
+          // Extruder inlet: ALWAYS show the loaded filament color
           const isDisplayed = currentLeftUnit?.id === unit.id;
           return {
-            leftActiveSlot: isDisplayed ? slotIndex : null,
+            leftActiveSlot: isDisplayed ? slotIndex : null,  // Wire path only when AMS is displayed
             rightActiveSlot: null,
-            leftFilamentColor: isDisplayed ? color : null,  // Hide color if different AMS is selected
+            leftFilamentColor: color,  // Extruder inlet always shows loaded color
             rightFilamentColor: null
           };
         } else {
-          // Right UI panel (extruder 1) - rightUnits filters for amsExtruderMap === 1
+          // Right UI panel (extruder 0 = RIGHT physical nozzle) - rightUnits filters for amsExtruderMap === 0
           const isDisplayed = currentRightUnit?.id === unit.id;
           return {
             leftActiveSlot: null,
-            rightActiveSlot: isDisplayed ? slotIndex : null,
+            rightActiveSlot: isDisplayed ? slotIndex : null,  // Wire path only when AMS is displayed
             leftFilamentColor: null,
-            rightFilamentColor: isDisplayed ? color : null  // Hide color if different AMS is selected
+            rightFilamentColor: color  // Extruder inlet always shows loaded color
           };
         }
       }
@@ -1211,12 +1288,13 @@ export function AMSSectionDual({ printerId, printerModel, status, nozzleCount }:
       {/* Filament Change Progress Card - appears during load/unload operations */}
       {showFilamentChangeCard && (
         <FilamentChangeCard
-          isLoading={amsOps.isLoadOperation}
+          isLoading={isFilamentLoadOperation}
           amsStatusMain={amsStatusMain}
           amsStatusSub={status?.ams_status_sub ?? 0}
           trayNow={trayNow}
           targetTrayId={amsOps.loadTargetTrayId}
           onComplete={handleFilamentChangeComplete}
+          operationInitiated={amsOps.state === 'LOADING' || amsOps.state === 'UNLOADING'}
         />
       )}
 

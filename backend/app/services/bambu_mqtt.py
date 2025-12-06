@@ -753,10 +753,13 @@ class BambuMQTTClient:
             if ams_id is not None and info is not None:
                 try:
                     info_val = int(info) if isinstance(info, str) else info
-                    # Extract bit 8 for extruder assignment (0=right, 1=left)
-                    extruder_id = (info_val >> 8) & 0x1
+                    # Extract bit 8 for extruder assignment
+                    # Bit 8 = 0 means LEFT extruder (id 1), bit 8 = 1 means RIGHT extruder (id 0)
+                    # So we invert: extruder_id = 1 - bit8
+                    bit8 = (info_val >> 8) & 0x1
+                    extruder_id = 1 - bit8  # 0=right, 1=left
                     ams_extruder_map[str(ams_id)] = extruder_id
-                    logger.debug(f"[{self.serial_number}] AMS {ams_id} info={info_val} -> extruder {extruder_id}")
+                    logger.debug(f"[{self.serial_number}] AMS {ams_id} info={info_val} (bit8={bit8}) -> extruder {extruder_id}")
                 except (ValueError, TypeError):
                     pass
         if ams_extruder_map:
@@ -2394,8 +2397,7 @@ class BambuMQTTClient:
 
         Args:
             tray_id: Global tray ID (0-15 for AMS slots, or 254 for external spool)
-            extruder_id: Extruder ID for dual-nozzle printers (0=right, 1=left).
-                         If None, defaults to 0.
+            extruder_id: Unused - kept for API compatibility
 
         Returns:
             True if command was sent, False otherwise
@@ -2404,11 +2406,7 @@ class BambuMQTTClient:
             logger.warning(f"[{self.serial_number}] Cannot load filament: not connected")
             return False
 
-        # Default to extruder 0 if not specified
-        curr_nozzle = extruder_id if extruder_id is not None else 0
-
-        # Convert global tray_id to ams_id and slot_id
-        # External spool is special case (254)
+        # Calculate ams_id and slot_id for logging
         if tray_id == 254:
             ams_id = 255  # External spool
             slot_id = 254
@@ -2416,24 +2414,26 @@ class BambuMQTTClient:
             ams_id = tray_id // 4  # AMS unit (0, 1, 2, 3...)
             slot_id = tray_id % 4  # Slot within AMS (0, 1, 2, 3)
 
-        # Build command with ams_id and slot_id format (per HA-Bambulab integration)
-        # Note: curr_nozzle is NOT included - ha-bambulab doesn't use it and it may cause issues
+        # Command format from BambuStudio traffic capture:
+        # - No extruder_id field
+        # - curr_temp and tar_temp are -1 (not 0)
+        self._sequence_id += 1
         command = {
             "print": {
                 "command": "ams_change_filament",
-                "target": tray_id,  # Global tray ID (ams_id * 4 + slot_id)
+                "sequence_id": str(self._sequence_id),
                 "ams_id": ams_id,
                 "slot_id": slot_id,
-                "curr_temp": 220,
-                "tar_temp": 220,
-                "sequence_id": "0"
+                "target": tray_id,
+                "curr_temp": -1,
+                "tar_temp": -1
             }
         }
 
         command_json = json.dumps(command)
         logger.info(f"[{self.serial_number}] Publishing ams_change_filament command: {command_json}")
         self._client.publish(self.topic_publish, command_json)
-        logger.info(f"[{self.serial_number}] Loading filament from AMS {ams_id} slot {slot_id} (global tray {tray_id}) to extruder {curr_nozzle}")
+        logger.info(f"[{self.serial_number}] Loading filament from tray {tray_id} (AMS {ams_id} slot {slot_id})")
 
         # Track this load request for H2D dual-nozzle disambiguation
         # H2D reports only slot number (0-3) in tray_now, so we use our tracked value
@@ -2457,32 +2457,38 @@ class BambuMQTTClient:
         tray_now = self.state.tray_now
         logger.info(f"[{self.serial_number}] Unload requested, tray_now={tray_now}")
 
-        # Determine the ams_id from tray_now (if valid tray is loaded)
-        # From BambuStudio source: unload requires target=255 AND slot_id=255
-        # plus the ams_id of the source AMS unit
-        if tray_now is not None and tray_now < 254:
-            ams_id = tray_now // 4
+        # Determine source ams_id for the unload command
+        if tray_now == 255 or tray_now == 254:
+            ams_id = 255  # No filament or external spool
         else:
-            ams_id = 0  # Default to AMS 0 if no tray loaded
+            ams_id = tray_now // 4  # Source AMS
 
-        # Build unload command using BambuStudio's "new protocol"
-        # Key: Both target=255 AND slot_id=255 are required for unload
+        # Command format from BambuStudio traffic capture:
+        # - No extruder_id field
+        # - For UNLOAD: curr_temp and tar_temp are the actual nozzle temp (e.g., 210)
+        # - slot_id=255 and target=255 for unload
+        # Get current nozzle temperature for the unload command
+        nozzle_temp = int(self.state.temperatures.get("nozzle", 210))
+        if nozzle_temp < 180:
+            nozzle_temp = 210  # Default to PLA temp if nozzle is cold
+
+        self._sequence_id += 1
         command = {
             "print": {
                 "command": "ams_change_filament",
-                "sequence_id": "0",
-                "target": 255,    # 255 = unload
-                "slot_id": 255,   # 255 = unload (new protocol)
+                "sequence_id": str(self._sequence_id),
                 "ams_id": ams_id,
-                "curr_temp": 220,
-                "tar_temp": 220
+                "slot_id": 255,  # 255 = unload marker
+                "target": 255,   # 255 = unload destination
+                "curr_temp": nozzle_temp,
+                "tar_temp": nozzle_temp
             }
         }
 
         command_json = json.dumps(command)
         logger.info(f"[{self.serial_number}] Publishing ams_change_filament (unload) command: {command_json}")
         self._client.publish(self.topic_publish, command_json)
-        logger.info(f"[{self.serial_number}] Unloading filament from AMS {ams_id}")
+        logger.info(f"[{self.serial_number}] Unloading filament (tray_now was {tray_now})")
 
         # Clear tracked load request since we're unloading
         self._last_load_tray_id = None
