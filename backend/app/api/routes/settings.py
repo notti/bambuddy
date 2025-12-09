@@ -21,6 +21,7 @@ from backend.app.models.filament import Filament
 from backend.app.models.maintenance import MaintenanceType, PrinterMaintenance, MaintenanceHistory
 from backend.app.models.archive import PrintArchive
 from backend.app.schemas.settings import AppSettings, AppSettingsUpdate
+from backend.app.services.printer_manager import printer_manager
 
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -805,6 +806,18 @@ async def import_backup(
                 restored["archives"] = restored.get("archives", 0) + 1
 
     await db.commit()
+
+    # If printers were in the backup (restored, updated, or skipped), reconnect all active printers
+    # This ensures connections are re-established after restore, even if printers were skipped
+    if "printers" in backup:
+        # Fetch all active printers and connect them
+        result = await db.execute(
+            select(Printer).where(Printer.is_active == True)
+        )
+        active_printers = result.scalars().all()
+        for printer in active_printers:
+            # This will disconnect existing connection (if any) and reconnect
+            await printer_manager.connect_printer(printer)
 
     # Build summary message
     restored_parts = []
