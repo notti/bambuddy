@@ -237,17 +237,25 @@ export function Layout() {
       return;
     }
 
-    // Number keys for navigation (1-9) - follows sidebar order for internal nav items only
+    // Number keys for navigation (1-9) - follows sidebar order including external links
     if (!e.metaKey && !e.ctrlKey && !e.altKey) {
       const keyNum = parseInt(e.key);
-      const internalItems = orderedSidebarIds.filter(id => !isExternalLinkId(id));
-      if (keyNum >= 1 && keyNum <= internalItems.length) {
-        const navItem = navItemsMap.get(internalItems[keyNum - 1]);
-        if (navItem) {
-          e.preventDefault();
-          navigate(navItem.to);
-          return;
+      if (keyNum >= 1 && keyNum <= orderedSidebarIds.length && keyNum <= 9) {
+        const id = orderedSidebarIds[keyNum - 1];
+        e.preventDefault();
+
+        if (isExternalLinkId(id)) {
+          // External link - navigate to iframe page
+          const linkId = id.replace('ext-', '');
+          navigate(`/external/${linkId}`);
+        } else {
+          // Internal nav item
+          const navItem = navItemsMap.get(id);
+          if (navItem) {
+            navigate(navItem.to);
+          }
         }
+        return;
       }
 
       switch (e.key) {
@@ -550,10 +558,15 @@ export function Layout() {
       {showShortcuts && (
         <KeyboardShortcutsModal
           onClose={() => setShowShortcuts(false)}
-          navItems={orderedSidebarIds
-            .filter(id => !isExternalLinkId(id))
-            .map(id => navItemsMap.get(id)!)
-            .filter(Boolean)}
+          sidebarItems={orderedSidebarIds.map(id => {
+            if (isExternalLinkId(id)) {
+              const extLink = extLinksMap.get(id);
+              return extLink ? { type: 'external' as const, label: extLink.name } : null;
+            } else {
+              const navItem = navItemsMap.get(id);
+              return navItem ? { type: 'nav' as const, label: navItem.labelKey, labelKey: navItem.labelKey } : null;
+            }
+          }).filter(Boolean) as { type: 'nav' | 'external'; label: string; labelKey?: string }[]}
         />
       )}
     </div>
