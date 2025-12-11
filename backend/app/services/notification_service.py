@@ -107,9 +107,15 @@ class NotificationService:
         return f"{minutes}m"
 
     def _clean_filename(self, filename: str) -> str:
-        """Remove file extensions from filename."""
+        """Extract filename and remove file extensions."""
+        import os
+        # Strip path prefix (e.g., /data/Metadata/plate_5.gcode -> plate_5.gcode)
+        filename = os.path.basename(filename)
+        # Remove common extensions
         if filename.endswith(".gcode.3mf"):
             return filename[:-10]
+        elif filename.endswith(".gcode"):
+            return filename[:-6]
         elif filename.endswith(".3mf"):
             return filename[:-4]
         return filename
@@ -552,9 +558,21 @@ class NotificationService:
             logger.info(f"No notification providers configured for print_start event on printer {printer_id}")
             return
 
-        filename = self._clean_filename(data.get("filename", "Unknown"))
-        estimated_time = data.get("raw_data", {}).get("print", {}).get("mc_remaining_time")
-        time_str = self._format_duration(estimated_time * 60 if estimated_time else None)
+        # Use subtask_name (project name) if available, otherwise use filename
+        subtask_name = data.get("subtask_name")
+        if subtask_name:
+            # Replace underscores with spaces for readability
+            filename = subtask_name.replace("_", " ")
+        else:
+            filename = self._clean_filename(data.get("filename", "Unknown"))
+
+        # remaining_time can be passed directly, or look in raw_data at top level
+        # mc_remaining_time is in minutes in MQTT data
+        estimated_time = data.get("remaining_time")
+        if estimated_time is None:
+            raw_time = data.get("raw_data", {}).get("mc_remaining_time")
+            estimated_time = raw_time * 60 if raw_time else None
+        time_str = self._format_duration(estimated_time)
 
         variables = {
             "printer": printer_name,
@@ -598,7 +616,12 @@ class NotificationService:
             logger.info(f"No notification providers configured for {event_field} event on printer {printer_id}")
             return
 
-        filename = self._clean_filename(data.get("filename", "Unknown"))
+        # Use subtask_name (project name) if available, otherwise use filename
+        subtask_name = data.get("subtask_name")
+        if subtask_name:
+            filename = subtask_name.replace("_", " ")
+        else:
+            filename = self._clean_filename(data.get("filename", "Unknown"))
 
         variables = {
             "printer": printer_name,
