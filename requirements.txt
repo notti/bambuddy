@@ -17,9 +17,18 @@ aioftp>=0.22.0
 
 # 3MF Processing (standard zipfile is sufficient for Bambu 3MF files)
 
+# Excel Export
+openpyxl>=3.1.0
+
+# Notifications
+pywebpush>=2.0.0
+
 # Utilities
 python-multipart>=0.0.6
 aiofiles>=23.0.0
+
+# System monitoring
+psutil>=6.0.0
 
 # Development
 pytest>=8.0.0

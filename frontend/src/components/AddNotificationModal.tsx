@@ -12,11 +12,11 @@ interface AddNotificationModalProps {
 }
 
 const PROVIDER_OPTIONS: { value: ProviderType; label: string; description: string }[] = [
-  { value: 'discord', label: 'Discord', description: 'Send to Discord channel via webhook' },
+  { value: 'email', label: 'Email', description: 'SMTP email notifications' },
   { value: 'telegram', label: 'Telegram', description: 'Notifications via Telegram bot' },
+  { value: 'discord', label: 'Discord', description: 'Send to Discord channel via webhook' },
   { value: 'ntfy', label: 'ntfy', description: 'Free, self-hostable push notifications' },
   { value: 'pushover', label: 'Pushover', description: 'Simple, reliable push notifications' },
-  { value: 'email', label: 'Email', description: 'SMTP email notifications' },
   { value: 'callmebot', label: 'CallMeBot/WhatsApp', description: 'Free WhatsApp notifications via CallMeBot' },
   { value: 'webhook', label: 'Webhook', description: 'Generic HTTP POST to any URL' },
 ];
@@ -26,7 +26,7 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
   const isEditing = !!provider;
 
   const [name, setName] = useState(provider?.name || '');
-  const [providerType, setProviderType] = useState<ProviderType>(provider?.provider_type || 'discord');
+  const [providerType, setProviderType] = useState<ProviderType>(provider?.provider_type || 'email');
   const [printerId, setPrinterId] = useState<number | null>(provider?.printer_id || null);
   const [quietHoursEnabled, setQuietHoursEnabled] = useState(provider?.quiet_hours_enabled || false);
   const [quietHoursStart, setQuietHoursStart] = useState(provider?.quiet_hours_start || '22:00');
@@ -227,7 +227,7 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
       onClick={onClose}
     >
       <div
-        className="bg-bambu-dark-secondary rounded-xl border border-bambu-dark-tertiary w-full max-w-lg my-8"
+        className="bg-bambu-dark-secondary rounded-xl border border-bambu-dark-tertiary w-full max-w-lg my-8 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

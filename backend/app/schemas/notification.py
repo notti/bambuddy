@@ -15,6 +15,8 @@ class ProviderType(str, Enum):
     PUSHOVER = "pushover"
     TELEGRAM = "telegram"
     EMAIL = "email"
+    DISCORD = "discord"
+    WEBHOOK = "webhook"
 
 
 class NotificationProviderBase(BaseModel):
@@ -37,6 +39,10 @@ class NotificationProviderBase(BaseModel):
     on_printer_error: bool = Field(default=False, description="Notify on printer errors (AMS, etc.)")
     on_filament_low: bool = Field(default=False, description="Notify when filament is running low")
     on_maintenance_due: bool = Field(default=False, description="Notify when maintenance is due")
+
+    # Event triggers - AMS environmental alarms
+    on_ams_humidity_high: bool = Field(default=False, description="Notify when AMS humidity exceeds threshold")
+    on_ams_temperature_high: bool = Field(default=False, description="Notify when AMS temperature exceeds threshold")
 
     # Quiet hours
     quiet_hours_enabled: bool = Field(default=False, description="Enable quiet hours")
@@ -93,6 +99,10 @@ class NotificationProviderUpdate(BaseModel):
     on_printer_error: bool | None = None
     on_filament_low: bool | None = None
     on_maintenance_due: bool | None = None
+
+    # Event triggers - AMS environmental alarms
+    on_ams_humidity_high: bool | None = None
+    on_ams_temperature_high: bool | None = None
 
     # Quiet hours
     quiet_hours_enabled: bool | None = None

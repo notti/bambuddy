@@ -7,6 +7,9 @@ from backend.app.models.maintenance import MaintenanceType, PrinterMaintenance, 
 from backend.app.models.kprofile_note import KProfileNote
 from backend.app.models.notification_template import NotificationTemplate
 from backend.app.models.notification import NotificationLog
+from backend.app.models.project import Project
+from backend.app.models.api_key import APIKey
+from backend.app.models.ams_history import AMSSensorHistory
 
 __all__ = [
     "Printer",
@@ -20,4 +23,7 @@ __all__ = [
     "KProfileNote",
     "NotificationTemplate",
     "NotificationLog",
+    "Project",
+    "APIKey",
+    "AMSSensorHistory",
 ]

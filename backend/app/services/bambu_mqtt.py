@@ -1354,6 +1354,7 @@ class BambuMQTTClient:
             self.state.state == "RUNNING"
             and self._previous_gcode_state != "RUNNING"
             and current_file
+            and not self._was_running  # Prevent duplicates when resuming from PAUSE
         )
         # Also detect if file changed while running (new print started)
         is_file_change = (
@@ -1385,6 +1386,7 @@ class BambuMQTTClient:
             self.on_print_start({
                 "filename": current_file,
                 "subtask_name": self.state.subtask_name,
+                "remaining_time": self.state.remaining_time * 60 if self.state.remaining_time > 0 else None,  # Convert minutes to seconds
                 "raw_data": data,
             })
 

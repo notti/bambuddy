@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.notification import NotificationLog, NotificationProvider, NotificationDigestQueue
 from backend.app.models.notification_template import NotificationTemplate
+from backend.app.models.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +107,15 @@ class NotificationService:
         return f"{minutes}m"
 
     def _clean_filename(self, filename: str) -> str:
-        """Remove file extensions from filename."""
+        """Extract filename and remove file extensions."""
+        import os
+        # Strip path prefix (e.g., /data/Metadata/plate_5.gcode -> plate_5.gcode)
+        filename = os.path.basename(filename)
+        # Remove common extensions
         if filename.endswith(".gcode.3mf"):
             return filename[:-10]
+        elif filename.endswith(".gcode"):
+            return filename[:-6]
         elif filename.endswith(".3mf"):
             return filename[:-4]
         return filename
@@ -380,7 +387,7 @@ class NotificationService:
             return False, f"Webhook error: {str(e)}"
 
     async def _send_to_provider(
-        self, provider: NotificationProvider, title: str, message: str
+        self, provider: NotificationProvider, title: str, message: str, db: AsyncSession | None = None
     ) -> tuple[bool, str]:
         """Send notification to a specific provider."""
         # Check quiet hours
@@ -487,11 +494,19 @@ class NotificationService:
         event_type: str = "unknown",
         printer_id: int | None = None,
         printer_name: str | None = None,
+        force_immediate: bool = False,
     ):
-        """Send notification to multiple providers and log the results."""
+        """Send notification to multiple providers and log the results.
+
+        All notifications are always sent immediately. If digest mode is enabled,
+        the notification is ALSO queued for the daily digest summary.
+        """
         for provider in providers:
             try:
-                # Check if provider wants digest mode
+                # Always send notification immediately
+                success, error = await self._send_to_provider(provider, title, message, db)
+
+                # Also queue for digest if enabled (digest is a summary, not a queue)
                 if provider.daily_digest_enabled and provider.daily_digest_time:
                     await self._queue_for_digest(
                         provider=provider,
@@ -502,9 +517,6 @@ class NotificationService:
                         printer_id=printer_id,
                         printer_name=printer_name,
                     )
-                    continue
-
-                success, error = await self._send_to_provider(provider, title, message)
                 await self._update_provider_status(db, provider.id, success, error if not success else None)
                 await self._log_notification(
                     db=db,
@@ -546,9 +558,21 @@ class NotificationService:
             logger.info(f"No notification providers configured for print_start event on printer {printer_id}")
             return
 
-        filename = self._clean_filename(data.get("filename", "Unknown"))
-        estimated_time = data.get("raw_data", {}).get("print", {}).get("mc_remaining_time")
-        time_str = self._format_duration(estimated_time * 60 if estimated_time else None)
+        # Use subtask_name (project name) if available, otherwise use filename
+        subtask_name = data.get("subtask_name")
+        if subtask_name:
+            # Replace underscores with spaces for readability
+            filename = subtask_name.replace("_", " ")
+        else:
+            filename = self._clean_filename(data.get("filename", "Unknown"))
+
+        # remaining_time can be passed directly, or look in raw_data at top level
+        # mc_remaining_time is in minutes in MQTT data
+        estimated_time = data.get("remaining_time")
+        if estimated_time is None:
+            raw_time = data.get("raw_data", {}).get("mc_remaining_time")
+            estimated_time = raw_time * 60 if raw_time else None
+        time_str = self._format_duration(estimated_time)
 
         variables = {
             "printer": printer_name,
@@ -592,7 +616,12 @@ class NotificationService:
             logger.info(f"No notification providers configured for {event_field} event on printer {printer_id}")
             return
 
-        filename = self._clean_filename(data.get("filename", "Unknown"))
+        # Use subtask_name (project name) if available, otherwise use filename
+        subtask_name = data.get("subtask_name")
+        if subtask_name:
+            filename = subtask_name.replace("_", " ")
+        else:
+            filename = self._clean_filename(data.get("filename", "Unknown"))
 
         variables = {
             "printer": printer_name,
@@ -729,6 +758,56 @@ class NotificationService:
         title, message = await self._build_message_from_template(db, "maintenance_due", variables)
         await self._send_to_providers(providers, title, message, db, "maintenance_due", printer_id, printer_name)
 
+    async def on_ams_humidity_high(
+        self,
+        printer_id: int,
+        printer_name: str,
+        ams_label: str,
+        humidity: float,
+        threshold: float,
+        db: AsyncSession,
+    ):
+        """Handle AMS high humidity alarm event. Always sends immediately (bypasses digest)."""
+        providers = await self._get_providers_for_event(db, "on_ams_humidity_high", printer_id)
+        if not providers:
+            return
+
+        variables = {
+            "printer": printer_name,
+            "ams_label": ams_label,
+            "humidity": f"{humidity:.0f}",
+            "threshold": f"{threshold:.0f}",
+        }
+
+        title, message = await self._build_message_from_template(db, "ams_humidity_high", variables)
+        # Alarms always send immediately, bypassing digest mode
+        await self._send_to_providers(providers, title, message, db, "ams_humidity_high", printer_id, printer_name, force_immediate=True)
+
+    async def on_ams_temperature_high(
+        self,
+        printer_id: int,
+        printer_name: str,
+        ams_label: str,
+        temperature: float,
+        threshold: float,
+        db: AsyncSession,
+    ):
+        """Handle AMS high temperature alarm event. Always sends immediately (bypasses digest)."""
+        providers = await self._get_providers_for_event(db, "on_ams_temperature_high", printer_id)
+        if not providers:
+            return
+
+        variables = {
+            "printer": printer_name,
+            "ams_label": ams_label,
+            "temperature": f"{temperature:.1f}",
+            "threshold": f"{threshold:.1f}",
+        }
+
+        title, message = await self._build_message_from_template(db, "ams_temperature_high", variables)
+        # Alarms always send immediately, bypassing digest mode
+        await self._send_to_providers(providers, title, message, db, "ams_temperature_high", printer_id, printer_name, force_immediate=True)
+
     def clear_template_cache(self):
         """Clear the template cache. Call this when templates are updated."""
         self._template_cache.clear()
@@ -809,7 +888,7 @@ class NotificationService:
             body = "\n".join(body_parts)
 
             # Send the digest
-            success, error = await self._send_to_provider(provider, title, body)
+            success, error = await self._send_to_provider(provider, title, body, db)
 
             # Log the digest
             await self._log_notification(

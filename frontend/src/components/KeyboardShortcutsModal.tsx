@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { X, Keyboard } from 'lucide-react';
+import { X, Keyboard, ExternalLink } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent } from './Card';
 
@@ -9,41 +9,62 @@ interface NavItem {
   labelKey: string;
 }
 
+interface SidebarItem {
+  type: 'nav' | 'external';
+  label: string;
+  labelKey?: string;
+}
+
 interface KeyboardShortcutsModalProps {
   onClose: () => void;
   navItems?: NavItem[];
+  sidebarItems?: SidebarItem[];
 }
 
-function getShortcuts(navItems: NavItem[] | undefined, t: (key: string) => string) {
-  const navShortcuts = navItems
+function getShortcuts(
+  sidebarItems: SidebarItem[] | undefined,
+  navItems: NavItem[] | undefined,
+  t: (key: string) => string
+) {
+  // Use sidebarItems if provided (new format), otherwise fall back to navItems
+  const navShortcuts = sidebarItems
+    ? sidebarItems.slice(0, 9).map((item, index) => ({
+        keys: [String(index + 1)],
+        description: item.type === 'external'
+          ? `Open ${item.label}`
+          : `Go to ${item.labelKey ? t(item.labelKey) : item.label}`,
+        isExternal: item.type === 'external',
+      }))
+    : navItems
     ? navItems.map((item, index) => ({
         keys: [String(index + 1)],
         description: `Go to ${t(item.labelKey)}`,
+        isExternal: false,
       }))
     : [
-        { keys: ['1'], description: 'Go to Printers' },
-        { keys: ['2'], description: 'Go to Archives' },
-        { keys: ['3'], description: 'Go to Queue' },
-        { keys: ['4'], description: 'Go to Statistics' },
-        { keys: ['5'], description: 'Go to Cloud Profiles' },
-        { keys: ['6'], description: 'Go to Settings' },
+        { keys: ['1'], description: 'Go to Printers', isExternal: false },
+        { keys: ['2'], description: 'Go to Archives', isExternal: false },
+        { keys: ['3'], description: 'Go to Queue', isExternal: false },
+        { keys: ['4'], description: 'Go to Statistics', isExternal: false },
+        { keys: ['5'], description: 'Go to Cloud Profiles', isExternal: false },
+        { keys: ['6'], description: 'Go to Settings', isExternal: false },
       ];
 
   return [
     { category: 'Navigation', items: navShortcuts },
     { category: 'Archives', items: [
-      { keys: ['/'], description: 'Focus search' },
-      { keys: ['U'], description: 'Open upload modal' },
-      { keys: ['Esc'], description: 'Clear selection / blur input' },
-      { keys: ['Right-click'], description: 'Context menu on cards' },
+      { keys: ['/'], description: 'Focus search', isExternal: false },
+      { keys: ['U'], description: 'Open upload modal', isExternal: false },
+      { keys: ['Esc'], description: 'Clear selection / blur input', isExternal: false },
+      { keys: ['Right-click'], description: 'Context menu on cards', isExternal: false },
     ]},
     { category: 'K-Profiles', items: [
-      { keys: ['R'], description: 'Refresh profiles' },
-      { keys: ['N'], description: 'New profile' },
-      { keys: ['Esc'], description: 'Exit selection mode' },
+      { keys: ['R'], description: 'Refresh profiles', isExternal: false },
+      { keys: ['N'], description: 'New profile', isExternal: false },
+      { keys: ['Esc'], description: 'Exit selection mode', isExternal: false },
     ]},
     { category: 'General', items: [
-      { keys: ['?'], description: 'Show this help' },
+      { keys: ['?'], description: 'Show this help', isExternal: false },
     ]},
   ];
 }
@@ -56,9 +77,9 @@ function KeyBadge({ children }: { children: string }) {
   );
 }
 
-export function KeyboardShortcutsModal({ onClose, navItems }: KeyboardShortcutsModalProps) {
+export function KeyboardShortcutsModal({ onClose, navItems, sidebarItems }: KeyboardShortcutsModalProps) {
   const { t } = useTranslation();
-  const shortcuts = getShortcuts(navItems, t);
+  const shortcuts = getShortcuts(sidebarItems, navItems, t);
 
   // Close on Escape key
   useEffect(() => {
@@ -95,7 +116,12 @@ export function KeyboardShortcutsModal({ onClose, navItems }: KeyboardShortcutsM
                 <div className="space-y-2">
                   {section.items.map((shortcut) => (
                     <div key={shortcut.description} className="flex items-center justify-between">
-                      <span className="text-white text-sm">{shortcut.description}</span>
+                      <span className="text-white text-sm flex items-center gap-1.5">
+                        {shortcut.description}
+                        {shortcut.isExternal && (
+                          <ExternalLink className="w-3 h-3 text-bambu-gray" />
+                        )}
+                      </span>
                       <div className="flex gap-1">
                         {shortcut.keys.map((key) => (
                           <KeyBadge key={key}>{key}</KeyBadge>

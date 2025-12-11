@@ -439,9 +439,9 @@ class SpoolmanClient:
         if not tray_type or tray_type.strip() == "":
             return None
 
-        # Also need valid color to create filament (000000FF = unset/empty)
+        # Need valid color to create filament
         tray_color = tray_data.get("tray_color", "")
-        if not tray_color or tray_color in ("", "000000FF", "00000000"):
+        if not tray_color or tray_color in ("", "00000000"):
             logger.debug(f"Skipping tray with invalid color: {tray_color}")
             return None
 

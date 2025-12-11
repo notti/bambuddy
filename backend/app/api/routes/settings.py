@@ -63,11 +63,11 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
     for setting in db_settings:
         if setting.key in settings_dict:
             # Parse the value based on the expected type
-            if setting.key in ["auto_archive", "save_thumbnails", "capture_finish_photo", "spoolman_enabled", "check_updates"]:
+            if setting.key in ["auto_archive", "save_thumbnails", "capture_finish_photo", "spoolman_enabled", "check_updates", "telemetry_enabled"]:
                 settings_dict[setting.key] = setting.value.lower() == "true"
             elif setting.key in ["default_filament_cost", "energy_cost_per_kwh", "ams_temp_good", "ams_temp_fair"]:
                 settings_dict[setting.key] = float(setting.value)
-            elif setting.key in ["ams_humidity_good", "ams_humidity_fair"]:
+            elif setting.key in ["ams_humidity_good", "ams_humidity_fair", "ams_history_retention_days"]:
                 settings_dict[setting.key] = int(setting.value)
             elif setting.key == "default_printer_id":
                 # Handle nullable integer
