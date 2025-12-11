@@ -2,17 +2,44 @@
 
 All notable changes to Bambuddy will be documented in this file.
 
-## [Unreleased]
+## [0.1.5b4] - 2025-12-11
 
-### Added
-- Mobile PWA (Progressive Web App) support with offline capabilities
-- Playwright end-to-end test suite for comprehensive application testing
-- Filament spool fill levels displayed on printer cards
+New Features
 
-### Fixed
-- External links now properly receive keyboard shortcut assignments after reordering
-- External links open in main content area iframe instead of new browser tab
-- Spoolman sync now correctly handles all AMS trays (fixed black filament color bug)
+    Mobile PWA Support - Progressive Web App support for mobile devices
+    AMS Humidity/Temperature History - Clickable indicators open charts with 6h/24h/48h/7d history, min/max/avg statistics, and threshold reference lines
+    Webhooks & API Keys - API key authentication with granular permissions for external integrations
+    System Info Page - New page showing system information
+    Multi-plate Cover Image - Archive cards now show cover image of the printed plate for multi-plate files
+    Quick Notification Disable - Button to quickly disable notifications
+    Projects / Print Grouping - Group related prints into projects with progress tracking
+    Full-Text Search (FTS5) - Efficient search across print names, filenames, tags, notes, designer, and filament type
+    Failure Analysis - Dashboard widget showing failure rate with correlations and trends
+    Archive Comparison - Compare 2-5 archives side-by-side with highlighted differences
+    CSV/Excel Export - Export archives and statistics with current filters
+
+Improvements
+
+    Improved archive card context menu with submenu support
+    Improved notification scheduler and templates
+    Improved auto power off scheduler
+    Improved email notification provider
+    Configurable AMS data retention (default 30 days)
+
+Bug Fixes
+
+    Fixed bug where not all AMS spools were synced to Spoolman
+    Fixed bug where external links were not respected by hotkeys
+    Fixed context menu submenu not showing
+    Fixed project card thumbnails using correct API endpoint
+    Fixed archive PATCH 500 error (FTS5 index rebuild)
+    Fixed clipboard API fallback for HTTP contexts
+
+Infrastructure
+
+    Added comprehensive automated testing (pytest, vitest, playwright)
+    GitHub Actions CI/CD workflow for automated testing
+    Removed PWA push notifications
 
 ## [0.1.5b4] - 2025-12-10
 
