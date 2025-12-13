@@ -1,21 +1,19 @@
 import asyncio
 import logging
-import os
-from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
-from pathlib import Path
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
 
 # Import settings first for logging configuration
-from backend.app.core.config import settings as app_settings, APP_VERSION
+from backend.app.core.config import APP_VERSION, settings as app_settings
 
 # Configure logging based on settings
 # DEBUG=true -> DEBUG level, else use LOG_LEVEL setting
 log_level_str = "DEBUG" if app_settings.debug else app_settings.log_level.upper()
 log_level = getattr(logging, log_level_str, logging.INFO)
-log_format = '%(asctime)s %(levelname)s [%(name)s] %(message)s'
+log_format = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 
 # Create root logger
 root_logger = logging.getLogger()
@@ -32,9 +30,9 @@ if app_settings.log_to_file:
     log_file = app_settings.log_dir / "bambuddy.log"
     file_handler = RotatingFileHandler(
         log_file,
-        maxBytes=5*1024*1024,  # 5MB
+        maxBytes=5 * 1024 * 1024,  # 5MB
         backupCount=3,
-        encoding='utf-8'
+        encoding="utf-8",
     )
     file_handler.setLevel(log_level)
     file_handler.setFormatter(logging.Formatter(log_format))
@@ -48,31 +46,51 @@ if not app_settings.debug:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logging.info(f"Bambuddy starting - debug={app_settings.debug}, log_level={log_level_str}")
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import delete, or_, select
 
-from backend.app.core.database import init_db, async_session
-from sqlalchemy import select, or_, delete
-from backend.app.core.websocket import ws_manager
-from backend.app.api.routes import printers, archives, websocket, filaments, cloud, smart_plugs, print_queue, kprofiles, notifications, notification_templates, spoolman, updates, maintenance, camera, external_links, projects, api_keys, webhook, ams_history, system
-from backend.app.api.routes import settings as settings_routes
-from backend.app.services.notification_service import notification_service
-from backend.app.services.printer_manager import (
-    printer_manager,
-    printer_state_to_dict,
-    init_printer_connections,
+from backend.app.api.routes import (
+    ams_history,
+    api_keys,
+    archives,
+    camera,
+    cloud,
+    external_links,
+    filaments,
+    kprofiles,
+    maintenance,
+    notification_templates,
+    notifications,
+    print_queue,
+    printers,
+    projects,
+    settings as settings_routes,
+    smart_plugs,
+    spoolman,
+    system,
+    updates,
+    webhook,
+    websocket,
 )
-from backend.app.services.print_scheduler import scheduler as print_scheduler
-from backend.app.services.bambu_mqtt import PrinterState
+from backend.app.api.routes.maintenance import _get_printer_maintenance_internal, ensure_default_types
+from backend.app.core.database import async_session, init_db
+from backend.app.core.websocket import ws_manager
+from backend.app.models.smart_plug import SmartPlug
 from backend.app.services.archive import ArchiveService
 from backend.app.services.bambu_ftp import download_file_async
+from backend.app.services.bambu_mqtt import PrinterState
+from backend.app.services.notification_service import notification_service
+from backend.app.services.print_scheduler import scheduler as print_scheduler
+from backend.app.services.printer_manager import (
+    init_printer_connections,
+    printer_manager,
+    printer_state_to_dict,
+)
 from backend.app.services.smart_plug_manager import smart_plug_manager
+from backend.app.services.spoolman import close_spoolman_client, get_spoolman_client, init_spoolman_client
 from backend.app.services.tasmota import tasmota_service
-from backend.app.models.smart_plug import SmartPlug
-from backend.app.services.spoolman import get_spoolman_client, init_spoolman_client, close_spoolman_client
-from backend.app.api.routes.maintenance import _get_printer_maintenance_internal, ensure_default_types
 from backend.app.services.telemetry import start_telemetry_loop
-
 
 # Track active prints: {(printer_id, filename): archive_id}
 _active_prints: dict[tuple[int, str], int] = {}
@@ -130,13 +148,11 @@ async def _report_spoolman_usage(printer_id: int, archive_id: int, logger):
 
         # Check if Spoolman is reachable
         if not await client.health_check():
-            logger.warning(f"Spoolman not reachable for usage reporting")
+            logger.warning("Spoolman not reachable for usage reporting")
             return
 
         # Get archive to find filament usage
-        result = await db.execute(
-            select(PrintArchive).where(PrintArchive.id == archive_id)
-        )
+        result = await db.execute(select(PrintArchive).where(PrintArchive.id == archive_id))
         archive = result.scalar_one_or_none()
         if not archive or not archive.filament_used_grams:
             logger.debug(f"No filament usage data for archive {archive_id}")
@@ -148,12 +164,12 @@ async def _report_spoolman_usage(printer_id: int, archive_id: int, logger):
         # Get current AMS state from printer to find the active spool
         state = printer_manager.get_status(printer_id)
         if not state or not state.raw_data:
-            logger.debug(f"No printer state available for usage reporting")
+            logger.debug("No printer state available for usage reporting")
             return
 
         ams_data = state.raw_data.get("ams")
         if not ams_data:
-            logger.debug(f"No AMS data available for usage reporting")
+            logger.debug("No AMS data available for usage reporting")
             return
 
         # Find spools with RFID tags in Spoolman and report usage
@@ -161,7 +177,6 @@ async def _report_spoolman_usage(printer_id: int, archive_id: int, logger):
         # TODO: In future, track which specific trays were used during the print
         spools_updated = 0
         for ams_unit in ams_data:
-            ams_id = int(ams_unit.get("id", 0))
             trays = ams_unit.get("tray", [])
 
             for tray_data in trays:
@@ -176,8 +191,7 @@ async def _report_spoolman_usage(printer_id: int, archive_id: int, logger):
                     result = await client.use_spool(spool["id"], filament_used)
                     if result:
                         logger.info(
-                            f"[SPOOLMAN] Reported {filament_used}g usage to spool {spool['id']} "
-                            f"(tag: {tag_uid})"
+                            f"[SPOOLMAN] Reported {filament_used}g usage to spool {spool['id']} " f"(tag: {tag_uid})"
                         )
                         spools_updated += 1
                         # Only report to one spool for single-material prints
@@ -204,9 +218,8 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
         # Update nozzle_count in database
         async with async_session() as db:
             from backend.app.models.printer import Printer
-            result = await db.execute(
-                select(Printer).where(Printer.id == printer_id)
-            )
+
+            result = await db.execute(select(Printer).where(Printer.id == printer_id))
             printer = result.scalar_one_or_none()
             if printer and printer.nozzle_count != 2:
                 printer.nozzle_count = 2
@@ -233,6 +246,7 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
 async def on_ams_change(printer_id: int, ams_data: list):
     """Handle AMS data changes - sync to Spoolman if enabled and auto mode."""
     import logging
+
     logger = logging.getLogger(__name__)
 
     try:
@@ -266,9 +280,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                 return
 
             # Get printer name for location
-            result = await db.execute(
-                select(Printer).where(Printer.id == printer_id)
-            )
+            result = await db.execute(select(Printer).where(Printer.id == printer_id))
             printer = result.scalar_one_or_none()
             printer_name = printer.name if printer else f"Printer {printer_id}"
 
@@ -295,6 +307,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
 
     except Exception as e:
         import logging
+
         logging.getLogger(__name__).warning(f"Spoolman AMS sync failed: {e}")
 
 
@@ -307,19 +320,17 @@ async def _send_print_start_notification(
     """Helper to send print start notification with optional archive data."""
     if logger is None:
         import logging
+
         logger = logging.getLogger(__name__)
 
     try:
         async with async_session() as db:
             from backend.app.models.printer import Printer
-            result = await db.execute(
-                select(Printer).where(Printer.id == printer_id)
-            )
+
+            result = await db.execute(select(Printer).where(Printer.id == printer_id))
             printer = result.scalar_one_or_none()
             printer_name = printer.name if printer else f"Printer {printer_id}"
-            await notification_service.on_print_start(
-                printer_id, printer_name, data, db, archive_data=archive_data
-            )
+            await notification_service.on_print_start(printer_id, printer_name, data, db, archive_data=archive_data)
     except Exception as e:
         logger.warning(f"Notification on_print_start failed: {e}")
 
@@ -327,6 +338,7 @@ async def _send_print_start_notification(
 async def on_print_start(printer_id: int, data: dict):
     """Handle print start - archive the 3MF file immediately."""
     import logging
+
     logger = logging.getLogger(__name__)
 
     logger.info(f"[CALLBACK] on_print_start called for printer {printer_id}, data keys: {list(data.keys())}")
@@ -347,14 +359,14 @@ async def on_print_start(printer_id: int, data: dict):
         from backend.app.models.printer import Printer
         from backend.app.services.bambu_ftp import list_files_async
 
-        result = await db.execute(
-            select(Printer).where(Printer.id == printer_id)
-        )
+        result = await db.execute(select(Printer).where(Printer.id == printer_id))
         printer = result.scalar_one_or_none()
 
         if not printer or not printer.auto_archive:
             # Send notification without archive data (auto-archive disabled)
-            logger.info(f"[CALLBACK] Skipping archive - printer: {printer is not None}, auto_archive: {printer.auto_archive if printer else 'N/A'}")
+            logger.info(
+                f"[CALLBACK] Skipping archive - printer: {printer is not None}, auto_archive: {printer.auto_archive if printer else 'N/A'}"
+            )
             if not notification_sent:
                 await _send_print_start_notification(printer_id, data, logger=logger)
             return
@@ -367,7 +379,7 @@ async def on_print_start(printer_id: int, data: dict):
 
         if not filename and not subtask_name:
             # Send notification without archive data (no filename)
-            logger.info(f"[CALLBACK] Skipping archive - no filename or subtask_name")
+            logger.info("[CALLBACK] Skipping archive - no filename or subtask_name")
             if not notification_sent:
                 await _send_print_start_notification(printer_id, data, logger=logger)
             return
@@ -399,12 +411,11 @@ async def on_print_start(printer_id: int, data: dict):
         if expected_archive_id:
             # This is a reprint/scheduled print - use existing archive, don't create new one
             logger.info(f"Using expected archive {expected_archive_id} for print (skipping duplicate)")
-            from backend.app.models.archive import PrintArchive
             from datetime import datetime
 
-            result = await db.execute(
-                select(PrintArchive).where(PrintArchive.id == expected_archive_id)
-            )
+            from backend.app.models.archive import PrintArchive
+
+            result = await db.execute(select(PrintArchive).where(PrintArchive.id == expected_archive_id))
             archive = result.scalar_one_or_none()
 
             if archive:
@@ -420,17 +431,19 @@ async def on_print_start(printer_id: int, data: dict):
 
                 # Set up energy tracking
                 try:
-                    plug_result = await db.execute(
-                        select(SmartPlug).where(SmartPlug.printer_id == printer_id)
-                    )
+                    plug_result = await db.execute(select(SmartPlug).where(SmartPlug.printer_id == printer_id))
                     plug = plug_result.scalar_one_or_none()
-                    logger.info(f"[ENERGY] Print start - archive {archive.id}, printer {printer_id}, plug found: {plug is not None}")
+                    logger.info(
+                        f"[ENERGY] Print start - archive {archive.id}, printer {printer_id}, plug found: {plug is not None}"
+                    )
                     if plug:
                         energy = await tasmota_service.get_energy(plug)
                         logger.info(f"[ENERGY] Energy response from plug: {energy}")
                         if energy and energy.get("total") is not None:
                             _print_energy_start[archive.id] = energy["total"]
-                            logger.info(f"[ENERGY] Recorded starting energy for archive {archive.id}: {energy['total']} kWh")
+                            logger.info(
+                                f"[ENERGY] Recorded starting energy for archive {archive.id}: {energy['total']} kWh"
+                            )
                         else:
                             logger.warning(f"[ENERGY] No 'total' in energy response for archive {archive.id}")
                     else:
@@ -438,10 +451,12 @@ async def on_print_start(printer_id: int, data: dict):
                 except Exception as e:
                     logger.warning(f"Failed to record starting energy: {e}")
 
-                await ws_manager.send_archive_updated({
-                    "id": archive.id,
-                    "status": "printing",
-                })
+                await ws_manager.send_archive_updated(
+                    {
+                        "id": archive.id,
+                        "status": "printing",
+                    }
+                )
 
                 # Send notification with archive data (reprint/scheduled)
                 if not notification_sent:
@@ -453,6 +468,7 @@ async def on_print_start(printer_id: int, data: dict):
         # Check if there's already a "printing" archive for this printer/file
         # This prevents duplicates when backend restarts during an active print
         from backend.app.models.archive import PrintArchive
+
         check_name = subtask_name or filename.split("/")[-1].replace(".gcode", "").replace(".3mf", "")
         existing = await db.execute(
             select(PrintArchive)
@@ -470,15 +486,15 @@ async def on_print_start(printer_id: int, data: dict):
             # Also set up energy tracking if not already tracked
             if existing_archive.id not in _print_energy_start:
                 try:
-                    plug_result = await db.execute(
-                        select(SmartPlug).where(SmartPlug.printer_id == printer_id)
-                    )
+                    plug_result = await db.execute(select(SmartPlug).where(SmartPlug.printer_id == printer_id))
                     plug = plug_result.scalar_one_or_none()
                     if plug:
                         energy = await tasmota_service.get_energy(plug)
                         if energy and energy.get("total") is not None:
                             _print_energy_start[existing_archive.id] = energy["total"]
-                            logger.info(f"Recorded starting energy for existing archive {existing_archive.id}: {energy['total']} kWh")
+                            logger.info(
+                                f"Recorded starting energy for existing archive {existing_archive.id}: {energy['total']} kWh"
+                            )
                 except Exception as e:
                     logger.warning(f"Failed to record starting energy for existing archive: {e}")
             # Send notification with archive data (existing archive)
@@ -604,17 +620,19 @@ async def on_print_start(printer_id: int, data: dict):
 
                 # Record starting energy from smart plug if available
                 try:
-                    plug_result = await db.execute(
-                        select(SmartPlug).where(SmartPlug.printer_id == printer_id)
-                    )
+                    plug_result = await db.execute(select(SmartPlug).where(SmartPlug.printer_id == printer_id))
                     plug = plug_result.scalar_one_or_none()
-                    logger.info(f"[ENERGY] Auto-archive print start - archive {archive.id}, printer {printer_id}, plug found: {plug is not None}")
+                    logger.info(
+                        f"[ENERGY] Auto-archive print start - archive {archive.id}, printer {printer_id}, plug found: {plug is not None}"
+                    )
                     if plug:
                         energy = await tasmota_service.get_energy(plug)
                         logger.info(f"[ENERGY] Auto-archive energy response: {energy}")
                         if energy and energy.get("total") is not None:
                             _print_energy_start[archive.id] = energy["total"]
-                            logger.info(f"[ENERGY] Recorded starting energy for archive {archive.id}: {energy['total']} kWh")
+                            logger.info(
+                                f"[ENERGY] Recorded starting energy for archive {archive.id}: {energy['total']} kWh"
+                            )
                         else:
                             logger.warning(f"[ENERGY] No 'total' in energy response for archive {archive.id}")
                     else:
@@ -622,13 +640,15 @@ async def on_print_start(printer_id: int, data: dict):
                 except Exception as e:
                     logger.warning(f"Failed to record starting energy: {e}")
 
-                await ws_manager.send_archive_created({
-                    "id": archive.id,
-                    "printer_id": archive.printer_id,
-                    "filename": archive.filename,
-                    "print_name": archive.print_name,
-                    "status": archive.status,
-                })
+                await ws_manager.send_archive_created(
+                    {
+                        "id": archive.id,
+                        "printer_id": archive.printer_id,
+                        "filename": archive.filename,
+                        "print_name": archive.print_name,
+                        "status": archive.status,
+                    }
+                )
 
                 # Send notification with archive data (new archive created)
                 if not notification_sent:
@@ -643,6 +663,7 @@ async def on_print_start(printer_id: int, data: dict):
 async def on_print_complete(printer_id: int, data: dict):
     """Handle print completion - update the archive status."""
     import logging
+
     logger = logging.getLogger(__name__)
 
     logger.info(f"[CALLBACK] on_print_complete started for printer {printer_id}")
@@ -656,7 +677,7 @@ async def on_print_complete(printer_id: int, data: dict):
     subtask_name = data.get("subtask_name", "")
 
     if not filename and not subtask_name:
-        logger.warning(f"Print complete without filename or subtask_name")
+        logger.warning("Print complete without filename or subtask_name")
         return
 
     logger.info(f"Print complete - filename: {filename}, subtask: {subtask_name}, status: {data.get('status')}")
@@ -723,10 +744,12 @@ async def on_print_complete(printer_id: int, data: dict):
                     select(PrintArchive)
                     .where(PrintArchive.printer_id == printer_id)
                     .where(PrintArchive.status == "printing")
-                    .where(or_(
-                        PrintArchive.print_name.ilike(f"%{subtask_name}%"),
-                        PrintArchive.filename.ilike(f"%{subtask_name}%"),
-                    ))
+                    .where(
+                        or_(
+                            PrintArchive.print_name.ilike(f"%{subtask_name}%"),
+                            PrintArchive.filename.ilike(f"%{subtask_name}%"),
+                        )
+                    )
                     .order_by(PrintArchive.created_at.desc())
                     .limit(1)
                 )
@@ -759,17 +782,49 @@ async def on_print_complete(printer_id: int, data: dict):
         async with async_session() as db:
             service = ArchiveService(db)
             status = data.get("status", "completed")
+
+            # Auto-detect failure reason
+            failure_reason = None
+            if status == "aborted":
+                failure_reason = "User cancelled"
+                logger.info("[ARCHIVE] Print was aborted by user, setting failure_reason='User cancelled'")
+            elif status == "failed":
+                # Try to determine failure reason from HMS errors
+                hms_errors = data.get("hms_errors", [])
+                if hms_errors:
+                    logger.info(f"[ARCHIVE] HMS errors at failure: {hms_errors}")
+                    # Map known HMS error modules to failure reasons
+                    # Module 0x07 = Filament, 0x0C = MC (Motion Controller), etc.
+                    for err in hms_errors:
+                        module = err.get("module", 0)
+                        if module == 0x07:  # Filament module
+                            failure_reason = "Filament runout"
+                            break
+                        elif module == 0x0C:  # Motion controller
+                            failure_reason = "Layer shift"
+                            break
+                        elif module == 0x05:  # Nozzle/extruder
+                            failure_reason = "Clogged nozzle"
+                            break
+                    if failure_reason:
+                        logger.info(f"[ARCHIVE] Detected failure_reason from HMS: {failure_reason}")
+                else:
+                    logger.info("[ARCHIVE] No HMS errors available to determine failure reason")
+
             await service.update_archive_status(
                 archive_id,
                 status=status,
                 completed_at=datetime.now() if status in ("completed", "failed", "aborted") else None,
+                failure_reason=failure_reason,
             )
-            logger.info(f"[ARCHIVE] Archive {archive_id} status updated to {status}")
+            logger.info(f"[ARCHIVE] Archive {archive_id} status updated to {status}, failure_reason={failure_reason}")
 
-            await ws_manager.send_archive_updated({
-                "id": archive_id,
-                "status": status,
-            })
+            await ws_manager.send_archive_updated(
+                {
+                    "id": archive_id,
+                    "status": status,
+                }
+            )
             logger.info(f"[ARCHIVE] WebSocket notification sent for archive {archive_id}")
     except Exception as e:
         logger.error(f"[ARCHIVE] Failed to update archive {archive_id} status: {e}", exc_info=True)
@@ -789,9 +844,7 @@ async def on_print_complete(printer_id: int, data: dict):
 
         async with async_session() as db:
             # Get smart plug for this printer (SmartPlug is imported at module level)
-            plug_result = await db.execute(
-                select(SmartPlug).where(SmartPlug.printer_id == printer_id)
-            )
+            plug_result = await db.execute(select(SmartPlug).where(SmartPlug.printer_id == printer_id))
             plug = plug_result.scalar_one_or_none()
 
             if plug:
@@ -804,24 +857,26 @@ async def on_print_complete(printer_id: int, data: dict):
                 if starting_kwh is not None and energy and energy.get("total") is not None:
                     ending_kwh = energy["total"]
                     energy_used = round(ending_kwh - starting_kwh, 4)
-                    logger.info(f"[ENERGY] Per-print energy: ending={ending_kwh}, starting={starting_kwh}, used={energy_used}")
+                    logger.info(
+                        f"[ENERGY] Per-print energy: ending={ending_kwh}, starting={starting_kwh}, used={energy_used}"
+                    )
                 elif starting_kwh is None:
-                    logger.info(f"[ENERGY] No starting energy recorded for this archive")
+                    logger.info("[ENERGY] No starting energy recorded for this archive")
                 else:
-                    logger.warning(f"[ENERGY] No 'total' in ending energy response")
+                    logger.warning("[ENERGY] No 'total' in ending energy response")
 
                 if energy_used is not None and energy_used >= 0:
                     # Get energy cost per kWh from settings (default to 0.15)
                     from backend.app.api.routes.settings import get_setting
+
                     energy_cost_per_kwh = await get_setting(db, "energy_cost_per_kwh")
                     cost_per_kwh = float(energy_cost_per_kwh) if energy_cost_per_kwh else 0.15
                     energy_cost = round(energy_used * cost_per_kwh, 2)
 
                     # Update archive with energy data
                     from backend.app.models.archive import PrintArchive
-                    result = await db.execute(
-                        select(PrintArchive).where(PrintArchive.id == archive_id)
-                    )
+
+                    result = await db.execute(select(PrintArchive).where(PrintArchive.id == archive_id))
                     archive = result.scalar_one_or_none()
                     if archive:
                         archive.energy_kwh = energy_used
@@ -834,6 +889,7 @@ async def on_print_complete(printer_id: int, data: dict):
                 logger.info(f"[ENERGY] No smart plug found for printer {printer_id} at print complete")
     except Exception as e:
         import logging
+
         logging.getLogger(__name__).warning(f"Failed to calculate energy: {e}")
 
     # Capture finish photo from printer camera
@@ -842,27 +898,27 @@ async def on_print_complete(printer_id: int, data: dict):
         async with async_session() as db:
             # Check if finish photo capture is enabled
             from backend.app.api.routes.settings import get_setting
+
             capture_enabled = await get_setting(db, "capture_finish_photo")
             logger.info(f"[PHOTO] capture_finish_photo setting: {capture_enabled}")
             if capture_enabled is None or capture_enabled.lower() == "true":
                 # Get printer details
                 from backend.app.models.printer import Printer
-                result = await db.execute(
-                    select(Printer).where(Printer.id == printer_id)
-                )
+
+                result = await db.execute(select(Printer).where(Printer.id == printer_id))
                 printer = result.scalar_one_or_none()
 
                 if printer and archive_id:
                     # Get archive to find its directory
                     from backend.app.models.archive import PrintArchive
-                    result = await db.execute(
-                        select(PrintArchive).where(PrintArchive.id == archive_id)
-                    )
+
+                    result = await db.execute(select(PrintArchive).where(PrintArchive.id == archive_id))
                     archive = result.scalar_one_or_none()
 
                     if archive:
-                        from backend.app.services.camera import capture_finish_photo
                         from pathlib import Path
+
+                        from backend.app.services.camera import capture_finish_photo
 
                         archive_dir = app_settings.base_dir / Path(archive.file_path).parent
                         photo_filename = await capture_finish_photo(
@@ -882,6 +938,7 @@ async def on_print_complete(printer_id: int, data: dict):
                             logger.info(f"Added finish photo to archive {archive_id}: {photo_filename}")
     except Exception as e:
         import logging
+
         logging.getLogger(__name__).warning(f"Finish photo capture failed: {e}")
 
     # Smart plug automation: schedule turn off when print completes
@@ -890,19 +947,19 @@ async def on_print_complete(printer_id: int, data: dict):
         async with async_session() as db:
             status = data.get("status", "completed")
             await smart_plug_manager.on_print_complete(printer_id, status, db)
-            logger.info(f"[AUTO-OFF] smart_plug_manager.on_print_complete completed")
+            logger.info("[AUTO-OFF] smart_plug_manager.on_print_complete completed")
     except Exception as e:
         import logging
+
         logging.getLogger(__name__).warning(f"Smart plug on_print_complete failed: {e}")
 
     # Send print complete notifications
     try:
         async with async_session() as db:
-            from backend.app.models.printer import Printer
             from backend.app.models.archive import PrintArchive
-            result = await db.execute(
-                select(Printer).where(Printer.id == printer_id)
-            )
+            from backend.app.models.printer import Printer
+
+            result = await db.execute(select(Printer).where(Printer.id == printer_id))
             printer = result.scalar_one_or_none()
             printer_name = printer.name if printer else f"Printer {printer_id}"
             status = data.get("status", "completed")
@@ -910,9 +967,7 @@ async def on_print_complete(printer_id: int, data: dict):
             # Fetch archive data for notification variables
             archive_data = None
             if archive_id:
-                archive_result = await db.execute(
-                    select(PrintArchive).where(PrintArchive.id == archive_id)
-                )
+                archive_result = await db.execute(select(PrintArchive).where(PrintArchive.id == archive_id))
                 archive = archive_result.scalar_one_or_none()
                 if archive:
                     archive_data = {
@@ -927,6 +982,7 @@ async def on_print_complete(printer_id: int, data: dict):
             )
     except Exception as e:
         import logging
+
         logging.getLogger(__name__).warning(f"Notification on_print_complete failed: {e}")
 
     # Check for maintenance due and send notifications (only for completed prints)
@@ -936,9 +992,7 @@ async def on_print_complete(printer_id: int, data: dict):
                 from backend.app.models.printer import Printer
 
                 # Get printer name
-                result = await db.execute(
-                    select(Printer).where(Printer.id == printer_id)
-                )
+                result = await db.execute(select(Printer).where(Printer.id == printer_id))
                 printer = result.scalar_one_or_none()
                 printer_name = printer.name if printer else f"Printer {printer_id}"
 
@@ -958,15 +1012,14 @@ async def on_print_complete(printer_id: int, data: dict):
                 ]
 
                 if items_needing_attention:
-                    await notification_service.on_maintenance_due(
-                        printer_id, printer_name, items_needing_attention, db
-                    )
+                    await notification_service.on_maintenance_due(printer_id, printer_name, items_needing_attention, db)
                     logger.info(
                         f"Sent maintenance notification for printer {printer_id}: "
                         f"{len(items_needing_attention)} items need attention"
                     )
         except Exception as e:
             import logging
+
             logging.getLogger(__name__).warning(f"Maintenance notification check failed: {e}")
 
     # Auto-scan for timelapse if recording was active during the print
@@ -977,15 +1030,16 @@ async def on_print_complete(printer_id: int, data: dict):
             await asyncio.sleep(5)
 
             async with async_session() as db:
-                from backend.app.models.printer import Printer
+                from datetime import timedelta
+                from pathlib import Path
+
                 from backend.app.models.archive import PrintArchive
+                from backend.app.models.printer import Printer
+
                 # NOTE: ArchiveService is imported at module level (line 67)
                 # Do NOT import it here - it causes a Python scoping issue that breaks
                 # the earlier usage of ArchiveService in this function
-                from backend.app.services.bambu_ftp import list_files_async, download_file_bytes_async
-                from pathlib import Path
-                import re
-                from datetime import timedelta
+                from backend.app.services.bambu_ftp import download_file_bytes_async, list_files_async
 
                 # Get archive (ArchiveService from module-level import)
                 service = ArchiveService(db)
@@ -1013,7 +1067,9 @@ async def on_print_complete(printer_id: int, data: dict):
                                 continue
 
                         if files:
-                            mp4_files = [f for f in files if not f.get("is_directory") and f.get("name", "").endswith(".mp4")]
+                            mp4_files = [
+                                f for f in files if not f.get("is_directory") and f.get("name", "").endswith(".mp4")
+                            ]
 
                             # Strategy: Find most recent timelapse by mtime
                             # Since we know timelapse was active during this print, use the most recent file
@@ -1029,8 +1085,10 @@ async def on_print_complete(printer_id: int, data: dict):
                                     archive_completed = archive.completed_at or datetime.now()
                                     if file_mtime and abs(file_mtime - archive_completed) < timedelta(minutes=30):
                                         # Download and attach
-                                        logger.info(f"[TIMELAPSE] Downloading timelapse {most_recent['name']} for archive {archive_id}")
-                                        remote_path = most_recent.get('path') or f"/timelapse/{most_recent['name']}"
+                                        logger.info(
+                                            f"[TIMELAPSE] Downloading timelapse {most_recent['name']} for archive {archive_id}"
+                                        )
+                                        remote_path = most_recent.get("path") or f"/timelapse/{most_recent['name']}"
                                         timelapse_data = await download_file_bytes_async(
                                             printer.ip_address, printer.access_code, remote_path
                                         )
@@ -1040,25 +1098,34 @@ async def on_print_complete(printer_id: int, data: dict):
                                                 archive_id, timelapse_data, most_recent["name"]
                                             )
                                             if success:
-                                                logger.info(f"[TIMELAPSE] Successfully attached timelapse to archive {archive_id}")
-                                                await ws_manager.send_archive_updated({
-                                                    "id": archive_id,
-                                                    "timelapse_attached": True,
-                                                })
+                                                logger.info(
+                                                    f"[TIMELAPSE] Successfully attached timelapse to archive {archive_id}"
+                                                )
+                                                await ws_manager.send_archive_updated(
+                                                    {
+                                                        "id": archive_id,
+                                                        "timelapse_attached": True,
+                                                    }
+                                                )
                                             else:
-                                                logger.warning(f"[TIMELAPSE] Failed to attach timelapse to archive {archive_id}")
+                                                logger.warning(
+                                                    f"[TIMELAPSE] Failed to attach timelapse to archive {archive_id}"
+                                                )
                                         else:
-                                            logger.warning(f"[TIMELAPSE] Failed to download timelapse file")
+                                            logger.warning("[TIMELAPSE] Failed to download timelapse file")
                                     else:
-                                        logger.info(f"[TIMELAPSE] Most recent timelapse mtime too far from print completion")
+                                        logger.info(
+                                            "[TIMELAPSE] Most recent timelapse mtime too far from print completion"
+                                        )
                                 else:
-                                    logger.info(f"[TIMELAPSE] No timelapse files with mtime found")
+                                    logger.info("[TIMELAPSE] No timelapse files with mtime found")
                         else:
-                            logger.info(f"[TIMELAPSE] No timelapse files found on printer")
+                            logger.info("[TIMELAPSE] No timelapse files found on printer")
                     else:
                         logger.warning(f"[TIMELAPSE] Printer not found for archive {archive_id}")
         except Exception as e:
             import logging
+
             logging.getLogger(__name__).warning(f"Timelapse auto-scan failed: {e}")
 
     # Update queue item if this was a scheduled print
@@ -1084,9 +1151,7 @@ async def on_print_complete(printer_id: int, data: dict):
 
                 # Handle auto_off_after - power off printer if requested (after cooldown)
                 if queue_item.auto_off_after:
-                    result = await db.execute(
-                        select(SmartPlug).where(SmartPlug.printer_id == printer_id)
-                    )
+                    result = await db.execute(select(SmartPlug).where(SmartPlug.printer_id == printer_id))
                     plug = result.scalar_one_or_none()
                     if plug and plug.enabled:
                         logger.info(f"Auto-off requested for printer {printer_id}, waiting for cooldown...")
@@ -1096,9 +1161,7 @@ async def on_print_complete(printer_id: int, data: dict):
                             await printer_manager.wait_for_cooldown(pid, target_temp=50.0, timeout=600)
                             # Re-fetch plug in new session
                             async with async_session() as new_db:
-                                result = await new_db.execute(
-                                    select(SmartPlug).where(SmartPlug.id == plug_id)
-                                )
+                                result = await new_db.execute(select(SmartPlug).where(SmartPlug.id == plug_id))
                                 p = result.scalar_one_or_none()
                                 if p and p.enabled:
                                     success = await tasmota_service.turn_off(p)
@@ -1110,6 +1173,7 @@ async def on_print_complete(printer_id: int, data: dict):
                         asyncio.create_task(cooldown_and_poweroff(printer_id, plug.id))
     except Exception as e:
         import logging
+
         logging.getLogger(__name__).warning(f"Queue item update failed: {e}")
 
     logger.info(f"[CALLBACK] on_print_complete finished for printer {printer_id}, archive {archive_id}")
@@ -1127,6 +1191,7 @@ AMS_ALARM_COOLDOWN_MINUTES = 60  # Don't send same alarm more than once per hour
 async def record_ams_history():
     """Background task to record AMS humidity and temperature data."""
     import logging
+
     logger = logging.getLogger(__name__)
 
     # Wait a short time for MQTT connections to establish on startup
@@ -1140,9 +1205,7 @@ async def record_ams_history():
 
             async with async_session() as db:
                 # Get all active printers
-                result = await db.execute(
-                    select(Printer).where(Printer.is_active == True)
-                )
+                result = await db.execute(select(Printer).where(Printer.is_active.is_(True)))
                 printers = result.scalars().all()
 
                 # Get alarm thresholds from settings
@@ -1229,9 +1292,14 @@ async def record_ams_history():
                             cooldown_key = f"{printer.id}:{ams_id}:humidity"
                             last_alarm = _ams_alarm_cooldown.get(cooldown_key)
                             now = datetime.now()
-                            if last_alarm is None or (now - last_alarm).total_seconds() >= AMS_ALARM_COOLDOWN_MINUTES * 60:
+                            if (
+                                last_alarm is None
+                                or (now - last_alarm).total_seconds() >= AMS_ALARM_COOLDOWN_MINUTES * 60
+                            ):
                                 _ams_alarm_cooldown[cooldown_key] = now
-                                logger.info(f"Sending humidity alarm for {printer.name} {ams_label}: {humidity}% > {humidity_threshold}%")
+                                logger.info(
+                                    f"Sending humidity alarm for {printer.name} {ams_label}: {humidity}% > {humidity_threshold}%"
+                                )
                                 try:
                                     # Call different notification method based on AMS type
                                     if is_ams_ht:
@@ -1250,9 +1318,14 @@ async def record_ams_history():
                             cooldown_key = f"{printer.id}:{ams_id}:temperature"
                             last_alarm = _ams_alarm_cooldown.get(cooldown_key)
                             now = datetime.now()
-                            if last_alarm is None or (now - last_alarm).total_seconds() >= AMS_ALARM_COOLDOWN_MINUTES * 60:
+                            if (
+                                last_alarm is None
+                                or (now - last_alarm).total_seconds() >= AMS_ALARM_COOLDOWN_MINUTES * 60
+                            ):
                                 _ams_alarm_cooldown[cooldown_key] = now
-                                logger.info(f"Sending temperature alarm for {printer.name} {ams_label}: {temperature}°C > {temp_threshold}°C")
+                                logger.info(
+                                    f"Sending temperature alarm for {printer.name} {ams_label}: {temperature}°C > {temp_threshold}°C"
+                                )
                                 try:
                                     # Call different notification method based on AMS type
                                     if is_ams_ht:
@@ -1277,19 +1350,18 @@ async def record_ams_history():
                     _ams_cleanup_counter = 0
                     # Get retention days from settings
                     from backend.app.models.settings import Settings
-                    result = await db.execute(
-                        select(Settings).where(Settings.key == "ams_history_retention_days")
-                    )
+
+                    result = await db.execute(select(Settings).where(Settings.key == "ams_history_retention_days"))
                     setting = result.scalar_one_or_none()
                     retention_days = int(setting.value) if setting else AMS_HISTORY_RETENTION_DAYS
 
                     cutoff = datetime.now() - timedelta(days=retention_days)
-                    result = await db.execute(
-                        delete(AMSSensorHistory).where(AMSSensorHistory.recorded_at < cutoff)
-                    )
+                    result = await db.execute(delete(AMSSensorHistory).where(AMSSensorHistory.recorded_at < cutoff))
                     await db.commit()
                     if result.rowcount > 0:
-                        logger.info(f"Cleaned up {result.rowcount} old AMS sensor history entries (older than {retention_days} days)")
+                        logger.info(
+                            f"Cleaned up {result.rowcount} old AMS sensor history entries (older than {retention_days} days)"
+                        )
 
             # Wait until next recording interval
             await asyncio.sleep(AMS_HISTORY_INTERVAL)
@@ -1338,6 +1410,7 @@ async def lifespan(app: FastAPI):
     # Auto-connect to Spoolman if enabled
     async with async_session() as db:
         from backend.app.api.routes.settings import get_setting
+
         spoolman_enabled = await get_setting(db, "spoolman_enabled")
         spoolman_url = await get_setting(db, "spoolman_url")
 

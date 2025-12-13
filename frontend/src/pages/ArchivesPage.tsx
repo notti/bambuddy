@@ -457,9 +457,9 @@ function ArchiveCard({
             className={`w-5 h-5 ${archive.is_favorite ? 'text-yellow-400 fill-yellow-400' : 'text-white'}`}
           />
         </button>
-        {archive.status === 'failed' && (
+        {(archive.status === 'failed' || archive.status === 'aborted') && (
           <div className="absolute top-2 left-12 px-2 py-1 rounded text-xs bg-red-500/80 text-white">
-            failed
+            {archive.status === 'aborted' ? 'cancelled' : 'failed'}
           </div>
         )}
         {/* Duplicate badge */}
@@ -1019,7 +1019,7 @@ export function ArchivesPage() {
           matchesCollection = a.is_favorite === true;
           break;
         case 'failed':
-          matchesCollection = a.status === 'failed';
+          matchesCollection = a.status === 'failed' || a.status === 'aborted';
           break;
         case 'duplicates':
           matchesCollection = a.duplicate_count > 0;
@@ -1044,7 +1044,7 @@ export function ArchivesPage() {
       const matchesFavorites = collection === 'favorites' || !filterFavorites || a.is_favorite;
 
       // Hide failed filter (don't apply when viewing failed collection)
-      const matchesHideFailed = collection === 'failed' || !hideFailed || a.status !== 'failed';
+      const matchesHideFailed = collection === 'failed' || !hideFailed || (a.status !== 'failed' && a.status !== 'aborted');
 
       // Tag filter
       const archiveTags = a.tags?.split(',').map(t => t.trim()) || [];

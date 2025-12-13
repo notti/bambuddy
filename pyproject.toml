@@ -36,6 +36,9 @@ ignore = [
     "ARG001", # unused function argument (common in FastAPI)
     "ARG002", # unused method argument
     "SIM108", # ternary operator (readability preference)
+    "SIM102", # nested if (readability preference)
+    "SIM105", # contextlib.suppress (readability preference)
+    "UP038",  # isinstance tuple syntax (readability preference)
 ]
 
 # Allow autofix for all enabled rules
@@ -47,6 +50,10 @@ unfixable = []
 "**/tests/**" = ["F401", "F811", "ARG"]
 # Init files often have unused imports for re-export
 "**/__init__.py" = ["F401"]
+# main.py needs early logging setup before other imports
+"backend/app/main.py" = ["E402"]
+# MQTT client has some unused variables for debugging
+"backend/app/services/bambu_mqtt.py" = ["F841"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["backend"]
