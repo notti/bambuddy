@@ -74,3 +74,6 @@ asyncio_mode = "auto"
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+markers = [
+    "docker: marks tests that run in Docker integration environment",
+]
