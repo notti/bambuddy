@@ -1279,8 +1279,8 @@ async def record_ams_history():
                 for printer in printers:
                     # Get current state from printer manager
                     state = printer_manager.get_status(printer.id)
-                    if not state or not state.raw_data:
-                        continue
+                    if not state or not state.connected or not state.raw_data:
+                        continue  # Skip disconnected printers - don't use stale data
 
                     raw_data = state.raw_data
                     if "ams" not in raw_data or not isinstance(raw_data["ams"], list):
