@@ -14,7 +14,11 @@ async function request<T>(
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || `HTTP ${response.status}`);
+    const detail = error.detail;
+    const message = typeof detail === 'string'
+      ? detail
+      : (detail ? JSON.stringify(detail) : `HTTP ${response.status}`);
+    throw new Error(message);
   }
 
   return response.json();
@@ -659,6 +663,8 @@ export interface SmartPlug {
   schedule_enabled: boolean;
   schedule_on_time: string | null;
   schedule_off_time: string | null;
+  // Switchbar visibility
+  show_in_switchbar: boolean;
   // Status
   last_state: string | null;
   last_checked: string | null;
@@ -687,6 +693,8 @@ export interface SmartPlugCreate {
   schedule_enabled?: boolean;
   schedule_on_time?: string | null;
   schedule_off_time?: string | null;
+  // Switchbar visibility
+  show_in_switchbar?: boolean;
 }
 
 export interface SmartPlugUpdate {
@@ -709,6 +717,8 @@ export interface SmartPlugUpdate {
   schedule_enabled?: boolean;
   schedule_on_time?: string | null;
   schedule_off_time?: string | null;
+  // Switchbar visibility
+  show_in_switchbar?: boolean;
 }
 
 export interface SmartPlugEnergy {
@@ -734,6 +744,21 @@ export interface SmartPlugTestResult {
   success: boolean;
   state: string | null;
   device_name: string | null;
+}
+
+// Tasmota Discovery types
+export interface TasmotaScanStatus {
+  running: boolean;
+  scanned: number;
+  total: number;
+}
+
+export interface DiscoveredTasmotaDevice {
+  ip_address: string;
+  name: string;
+  module: number | null;
+  state: string | null;
+  discovered_at: string | null;
 }
 
 // Print Queue types
@@ -1756,6 +1781,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ip_address, username, password }),
     }),
+
+  // Tasmota Discovery (auto-detects network)
+  startTasmotaScan: () =>
+    fetch(`${API_BASE}/smart-plugs/discover/scan`, { method: 'POST' })
+      .then(res => res.ok ? res.json() : res.json().then(e => { throw new Error(e.detail || `HTTP ${res.status}`); })),
+  getTasmotaScanStatus: () =>
+    request<TasmotaScanStatus>('/smart-plugs/discover/status'),
+  stopTasmotaScan: () =>
+    fetch(`${API_BASE}/smart-plugs/discover/stop`, { method: 'POST' })
+      .then(res => res.ok ? res.json() : res.json().then(e => { throw new Error(e.detail || `HTTP ${res.status}`); })),
+  getDiscoveredTasmotaDevices: () =>
+    request<DiscoveredTasmotaDevice[]>('/smart-plugs/discover/devices'),
 
   // Print Queue
   getQueue: (printerId?: number, status?: string) => {

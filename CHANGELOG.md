@@ -5,6 +5,8 @@ All notable changes to Bambuddy will be documented in this file.
 ## [0.1.6b] - 2025-12-28
 
 ### Added
+- **Tasmota device discovery** - Automatically discover Tasmota smart plugs on your network. Click "Discover Tasmota Devices" in the Add Smart Plug modal to scan your local subnet. Supports devices with and without authentication.
+- **Switchbar for quick smart plug access** - New sidebar widget for controlling smart plugs without leaving the current page. Enable "Show in Switchbar" for any plug to add it to the quick access panel. Shows real-time status, power consumption, and on/off controls.
 - **Timelapse editor** - Edit timelapse videos with trim, speed adjustment (0.25x-4x), and music overlay. Uses FFmpeg for server-side processing with browser-based preview.
 - **AMS filament preview** - Reprint modal shows filament comparison between what the print requires and what's currently loaded in the AMS. Compares both type and color with visual indicators (green=match, yellow=color mismatch, orange=type mismatch).
 - **File type badge** - Archive cards now show GCODE (green) or SOURCE (orange) badge to indicate whether the file is a sliced print-ready file or source-only.

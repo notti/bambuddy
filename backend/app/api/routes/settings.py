@@ -270,6 +270,7 @@ async def export_backup(
                     "schedule_enabled": plug.schedule_enabled,
                     "schedule_on_time": plug.schedule_on_time,
                     "schedule_off_time": plug.schedule_off_time,
+                    "show_in_switchbar": plug.show_in_switchbar,
                 }
             )
         backup["included"].append("smart_plugs")
@@ -739,6 +740,7 @@ async def import_backup(
                     existing.schedule_enabled = plug_data.get("schedule_enabled", False)
                     existing.schedule_on_time = plug_data.get("schedule_on_time")
                     existing.schedule_off_time = plug_data.get("schedule_off_time")
+                    existing.show_in_switchbar = plug_data.get("show_in_switchbar", False)
                     restored["smart_plugs"] += 1
                 else:
                     skipped["smart_plugs"] += 1
@@ -762,6 +764,7 @@ async def import_backup(
                     schedule_enabled=plug_data.get("schedule_enabled", False),
                     schedule_on_time=plug_data.get("schedule_on_time"),
                     schedule_off_time=plug_data.get("schedule_off_time"),
+                    show_in_switchbar=plug_data.get("show_in_switchbar", False),
                 )
                 db.add(plug)
                 restored["smart_plugs"] += 1

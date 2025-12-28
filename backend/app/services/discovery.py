@@ -479,6 +479,200 @@ class SubnetScanner:
         self._running = False
 
 
+class TasmotaScanner:
+    """Scanner for discovering Tasmota devices by probing IP addresses."""
+
+    HTTP_PORT = 80
+
+    def __init__(self):
+        self._discovered: dict[str, dict] = {}
+        self._running = False
+        self._scanned = 0
+        self._total = 0
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def discovered_devices(self) -> list[dict]:
+        return list(self._discovered.values())
+
+    @property
+    def progress(self) -> tuple[int, int]:
+        """Return (scanned, total) counts."""
+        return self._scanned, self._total
+
+    async def scan_range(self, from_ip: str, to_ip: str, timeout: float = 1.0) -> list[dict]:
+        """Scan an IP range for Tasmota devices.
+
+        Args:
+            from_ip: Starting IP address (e.g., "192.168.1.1")
+            to_ip: Ending IP address (e.g., "192.168.1.254")
+            timeout: Connection timeout per host in seconds
+
+        Returns:
+            List of discovered Tasmota devices
+        """
+        if self._running:
+            return []
+
+        self._running = True
+        self._discovered.clear()
+        self._scanned = 0
+
+        try:
+            start = ipaddress.ip_address(from_ip)
+            end = ipaddress.ip_address(to_ip)
+
+            # Generate list of IPs in range
+            hosts = []
+            current = start
+            while current <= end:
+                hosts.append(str(current))
+                current = ipaddress.ip_address(int(current) + 1)
+
+            self._total = len(hosts)
+
+            if self._total > 1024:
+                logger.warning(f"IP range has {self._total} hosts, limiting to 1024")
+                self._total = 1024
+                hosts = hosts[:1024]
+
+            logger.info(f"Starting Tasmota scan from {from_ip} to {to_ip} ({self._total} hosts)")
+
+            # Scan in batches to avoid overwhelming the network
+            batch_size = 50
+            for i in range(0, len(hosts), batch_size):
+                if not self._running:
+                    logger.info("Tasmota scan stopped by user")
+                    break
+
+                batch = hosts[i : i + batch_size]
+                tasks = [self._probe_host(ip) for ip in batch]
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                except Exception as e:
+                    logger.warning(f"Batch {i//batch_size} error: {e}")
+                self._scanned = min(i + batch_size, len(hosts))
+
+            logger.info(f"Tasmota scan complete. Found {len(self._discovered)} devices.")
+            return self.discovered_devices
+
+        except ValueError as e:
+            logger.error(f"Invalid IP address format: {e}")
+            return []
+        finally:
+            self._running = False
+
+    async def _probe_host(self, ip: str):
+        """Probe a single host for Tasmota HTTP API."""
+        try:
+            # Hard timeout of 5 seconds max per host
+            await asyncio.wait_for(self._do_probe(ip), timeout=5.0)
+        except TimeoutError:
+            pass
+        except Exception:
+            pass
+
+    async def _do_probe(self, ip: str):
+        """Actually probe the host."""
+        import httpx
+
+        try:
+            # Reasonable timeouts for network scanning
+            client_timeout = httpx.Timeout(3.0, connect=1.0)
+            async with httpx.AsyncClient(timeout=client_timeout, follow_redirects=False) as client:
+                # First try simple Power command - most reliable indicator of Tasmota
+                power_url = f"http://{ip}/cm?cmnd=Power"
+                try:
+                    power_response = await client.get(power_url)
+                    if power_response.status_code == 401:
+                        # Device requires auth - still a Tasmota device!
+                        logger.info(f"Discovered Tasmota at {ip} (requires auth - 401)")
+                        device = {
+                            "ip_address": ip,
+                            "name": f"Tasmota ({ip})",
+                            "module": None,
+                            "state": "UNKNOWN",
+                            "discovered_at": datetime.now().isoformat(),
+                        }
+                        self._discovered[ip] = device
+                        return
+
+                    if power_response.status_code != 200:
+                        return
+
+                    power_data = power_response.json()
+
+                    # Check for Tasmota auth warning (returns 200 with WARNING)
+                    if "WARNING" in power_data:
+                        logger.info(f"Discovered Tasmota at {ip} (requires auth)")
+                        device = {
+                            "ip_address": ip,
+                            "name": f"Tasmota ({ip})",
+                            "module": None,
+                            "state": "UNKNOWN",
+                            "discovered_at": datetime.now().isoformat(),
+                        }
+                        self._discovered[ip] = device
+                        return
+
+                    # Check if response looks like Tasmota (has POWER or POWER1 key)
+                    power_state = power_data.get("POWER") or power_data.get("POWER1")
+                    if power_state is None:
+                        return
+
+                except Exception as e:
+                    logger.debug(f"Error probing {ip}: {e}")
+                    return
+
+                # It's a Tasmota device! Now get more info
+                device_name = f"Tasmota ({ip})"
+                module = None
+
+                # Try to get device name from Status 0
+                try:
+                    status_url = f"http://{ip}/cm?cmnd=Status%200"
+                    status_response = await client.get(status_url)
+                    if status_response.status_code == 200:
+                        status_data = status_response.json()
+                        if "Status" in status_data:
+                            status = status_data["Status"]
+                            device_name = status.get("DeviceName") or device_name
+                            if not device_name or device_name == f"Tasmota ({ip})":
+                                # Try FriendlyName
+                                friendly = status.get("FriendlyName")
+                                if friendly and isinstance(friendly, list) and friendly[0]:
+                                    device_name = friendly[0]
+                            module = status.get("Module")
+                except Exception:
+                    pass
+
+                device = {
+                    "ip_address": ip,
+                    "name": device_name,
+                    "module": module,
+                    "state": power_state,
+                    "discovered_at": datetime.now().isoformat(),
+                }
+
+                self._discovered[ip] = device
+                logger.info(f"Discovered Tasmota device: {device_name} at {ip}")
+
+        except httpx.TimeoutException:
+            pass
+        except httpx.ConnectError:
+            pass
+        except Exception:
+            pass
+
+    def stop(self):
+        """Stop the current scan."""
+        self._running = False
+
+
 # Global instances
 discovery_service = PrinterDiscoveryService()
 subnet_scanner = SubnetScanner()
+tasmota_scanner = TasmotaScanner()

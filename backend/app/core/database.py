@@ -359,6 +359,12 @@ async def run_migrations(conn):
     except Exception:
         pass
 
+    # Migration: Add show_in_switchbar column to smart_plugs
+    try:
+        await conn.execute(text("ALTER TABLE smart_plugs ADD COLUMN show_in_switchbar BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+
 
 async def seed_notification_templates():
     """Seed default notification templates if they don't exist."""
