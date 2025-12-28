@@ -1,20 +1,46 @@
 """
-Bambu Lab printer discovery service using SSDP.
+Bambu Lab printer discovery service using SSDP and subnet scanning.
 
 Bambu Lab printers advertise themselves via SSDP (Simple Service Discovery Protocol)
 on the local network. This service listens for these advertisements and provides
 a list of discovered printers.
+
+For Docker environments where SSDP multicast doesn't work, subnet scanning is
+available as an alternative discovery method.
 """
 
 import asyncio
+import ipaddress
 import logging
+import os
 import re
 import socket
 import struct
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def is_running_in_docker() -> bool:
+    """Detect if we're running inside a Docker container."""
+    # Check for .dockerenv file
+    if Path("/.dockerenv").exists():
+        return True
+
+    # Check cgroup for docker/containerd
+    try:
+        with open("/proc/1/cgroup") as f:
+            content = f.read()
+            if "docker" in content or "containerd" in content or "kubepods" in content:
+                return True
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    # Check for container environment variable
+    return bool(os.environ.get("CONTAINER") or os.environ.get("DOCKER_CONTAINER"))
+
 
 # SSDP multicast address - Bambu uses port 2021, not standard 1900
 SSDP_ADDR = "239.255.255.250"
@@ -276,5 +302,183 @@ class PrinterDiscoveryService:
         logger.info(f"Discovered printer: {name} ({serial}) at {ip_address}")
 
 
-# Global discovery service instance
+class SubnetScanner:
+    """Scanner for discovering Bambu printers by probing IP addresses."""
+
+    # Bambu printer ports
+    MQTT_PORT = 8883
+    FTP_PORT = 990
+
+    def __init__(self):
+        self._discovered: dict[str, DiscoveredPrinter] = {}
+        self._running = False
+        self._scanned = 0
+        self._total = 0
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def discovered_printers(self) -> list[DiscoveredPrinter]:
+        return list(self._discovered.values())
+
+    @property
+    def progress(self) -> tuple[int, int]:
+        """Return (scanned, total) counts."""
+        return self._scanned, self._total
+
+    async def scan_subnet(self, subnet: str, timeout: float = 1.0) -> list[DiscoveredPrinter]:
+        """Scan a subnet for Bambu printers.
+
+        Args:
+            subnet: CIDR notation subnet (e.g., "192.168.1.0/24")
+            timeout: Connection timeout per host in seconds
+
+        Returns:
+            List of discovered printers
+        """
+        if self._running:
+            return []
+
+        self._running = True
+        self._discovered.clear()
+        self._scanned = 0
+
+        try:
+            network = ipaddress.ip_network(subnet, strict=False)
+            hosts = list(network.hosts())
+            self._total = len(hosts)
+
+            if self._total > 1024:
+                logger.warning(f"Subnet {subnet} has {self._total} hosts, limiting to /22 (1024 hosts)")
+                self._total = 1024
+                hosts = hosts[:1024]
+
+            logger.info(f"Starting subnet scan of {subnet} ({self._total} hosts)")
+
+            # Scan in batches to avoid overwhelming the network
+            batch_size = 50
+            for i in range(0, len(hosts), batch_size):
+                if not self._running:
+                    break
+
+                batch = hosts[i : i + batch_size]
+                tasks = [self._probe_host(str(ip), timeout) for ip in batch]
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self._scanned = min(i + batch_size, len(hosts))
+
+            logger.info(f"Subnet scan complete. Found {len(self._discovered)} printers.")
+            return self.discovered_printers
+
+        except ValueError as e:
+            logger.error(f"Invalid subnet format: {e}")
+            return []
+        finally:
+            self._running = False
+
+    async def _probe_host(self, ip: str, timeout: float):
+        """Probe a single host for Bambu printer ports."""
+        # Check FTP port (990) - more reliable indicator
+        ftp_open = await self._check_port(ip, self.FTP_PORT, timeout)
+        if not ftp_open:
+            return
+
+        # Also check MQTT port (8883) for confirmation
+        mqtt_open = await self._check_port(ip, self.MQTT_PORT, timeout)
+        if not mqtt_open:
+            return
+
+        # Both ports open - likely a Bambu printer
+        logger.info(f"Found potential Bambu printer at {ip}")
+
+        # Try to get printer info via SSDP unicast
+        serial, name, model = await self._get_printer_info_ssdp(ip, timeout)
+
+        printer = DiscoveredPrinter(
+            serial=serial or f"unknown-{ip.replace('.', '-')}",
+            name=name or f"Printer at {ip}",
+            ip_address=ip,
+            model=model,
+            discovered_at=datetime.now().isoformat(),
+        )
+        self._discovered[ip] = printer
+
+    async def _get_printer_info_ssdp(self, ip: str, timeout: float) -> tuple[str | None, str | None, str | None]:
+        """Try to get printer info via SSDP unicast query."""
+        loop = asyncio.get_event_loop()
+
+        def _query():
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+                sock.settimeout(timeout)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+                # Send M-SEARCH directly to the printer
+                msearch = (
+                    "M-SEARCH * HTTP/1.1\r\n"
+                    f"HOST: {ip}:{SSDP_PORT}\r\n"
+                    'MAN: "ssdp:discover"\r\n'
+                    "MX: 1\r\n"
+                    f"ST: {BAMBU_SEARCH_TARGET}\r\n"
+                    "\r\n"
+                )
+                sock.sendto(msearch.encode(), (ip, SSDP_PORT))
+
+                # Wait for response
+                data, _ = sock.recvfrom(4096)
+                response = data.decode("utf-8", errors="ignore")
+                sock.close()
+
+                # Parse response
+                serial = None
+                name = None
+                model = None
+
+                usn_match = re.search(r"USN:\s*(?:uuid:)?([^\s\r\n]+)", response, re.IGNORECASE)
+                if usn_match:
+                    serial = usn_match.group(1).strip()
+
+                name_match = re.search(r"DevName\.bambu\.com:\s*(.+?)(?:\r\n|\n|$)", response, re.IGNORECASE)
+                if name_match:
+                    name = name_match.group(1).strip()
+
+                model_match = re.search(r"DevModel\.bambu\.com:\s*(.+?)(?:\r\n|\n|$)", response, re.IGNORECASE)
+                if model_match:
+                    model = model_match.group(1).strip()
+
+                logger.debug(f"SSDP info from {ip}: serial={serial}, name={name}, model={model}")
+                return serial, name, model
+
+            except Exception as e:
+                logger.debug(f"SSDP query to {ip} failed: {e}")
+                return None, None, None
+
+        return await loop.run_in_executor(None, _query)
+
+    async def _check_port(self, ip: str, port: int, timeout: float) -> bool:
+        """Check if a port is open on the given IP."""
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
+            writer.close()
+            await writer.wait_closed()
+            logger.debug(f"Port {port} open on {ip}")
+            return True
+        except TimeoutError:
+            return False
+        except ConnectionRefusedError:
+            return False
+        except OSError as e:
+            # Log first few errors to help debug network issues
+            if self._scanned < 5:
+                logger.debug(f"OSError checking {ip}:{port}: {e}")
+            return False
+
+    def stop(self):
+        """Stop the current scan."""
+        self._running = False
+
+
+# Global instances
 discovery_service = PrinterDiscoveryService()
+subnet_scanner = SubnetScanner()

@@ -1496,6 +1496,18 @@ function AddPrinterModal({
   const [discovered, setDiscovered] = useState<DiscoveredPrinter[]>([]);
   const [discoveryError, setDiscoveryError] = useState('');
   const [hasScanned, setHasScanned] = useState(false);
+  const [isDocker, setIsDocker] = useState(false);
+  const [subnet, setSubnet] = useState('192.168.1.0/24');
+  const [scanProgress, setScanProgress] = useState({ scanned: 0, total: 0 });
+
+  // Fetch discovery info on mount
+  useEffect(() => {
+    discoveryApi.getInfo().then(info => {
+      setIsDocker(info.is_docker);
+    }).catch(() => {
+      // Ignore errors, assume not Docker
+    });
+  }, []);
 
   // Filter out already-added printers
   const newPrinters = discovered.filter(p => !existingSerials.includes(p.serial));
@@ -1505,38 +1517,64 @@ function AddPrinterModal({
     setDiscovered([]);
     setDiscovering(true);
     setHasScanned(false);
+    setScanProgress({ scanned: 0, total: 0 });
 
     try {
-      await discoveryApi.startDiscovery(10);
+      if (isDocker) {
+        // Use subnet scanning for Docker
+        await discoveryApi.startSubnetScan(subnet);
 
-      // Poll for discovered printers every second
-      const pollInterval = setInterval(async () => {
-        try {
-          const printers = await discoveryApi.getDiscoveredPrinters();
-          setDiscovered(printers);
-        } catch (e) {
-          console.error('Failed to get discovered printers:', e);
-        }
-      }, 1000);
+        // Poll for scan status and results
+        const pollInterval = setInterval(async () => {
+          try {
+            const status = await discoveryApi.getScanStatus();
+            setScanProgress({ scanned: status.scanned, total: status.total });
 
-      // Stop after 10 seconds
-      setTimeout(async () => {
-        clearInterval(pollInterval);
-        try {
-          await discoveryApi.stopDiscovery();
-        } catch (e) {
-          // Ignore stop errors
-        }
-        setDiscovering(false);
-        setHasScanned(true);
-        // Final fetch
-        try {
-          const printers = await discoveryApi.getDiscoveredPrinters();
-          setDiscovered(printers);
-        } catch (e) {
-          console.error('Failed to get final discovered printers:', e);
-        }
-      }, 10000);
+            const printers = await discoveryApi.getDiscoveredPrinters();
+            setDiscovered(printers);
+
+            if (!status.running) {
+              clearInterval(pollInterval);
+              setDiscovering(false);
+              setHasScanned(true);
+            }
+          } catch (e) {
+            console.error('Failed to get scan status:', e);
+          }
+        }, 500);
+      } else {
+        // Use SSDP discovery for native installs
+        await discoveryApi.startDiscovery(10);
+
+        // Poll for discovered printers every second
+        const pollInterval = setInterval(async () => {
+          try {
+            const printers = await discoveryApi.getDiscoveredPrinters();
+            setDiscovered(printers);
+          } catch (e) {
+            console.error('Failed to get discovered printers:', e);
+          }
+        }, 1000);
+
+        // Stop after 10 seconds
+        setTimeout(async () => {
+          clearInterval(pollInterval);
+          try {
+            await discoveryApi.stopDiscovery();
+          } catch (e) {
+            // Ignore stop errors
+          }
+          setDiscovering(false);
+          setHasScanned(true);
+          // Final fetch
+          try {
+            const printers = await discoveryApi.getDiscoveredPrinters();
+            setDiscovered(printers);
+          } catch (e) {
+            console.error('Failed to get final discovered printers:', e);
+          }
+        }, 10000);
+      }
     } catch (e) {
       console.error('Failed to start discovery:', e);
       setDiscoveryError(e instanceof Error ? e.message : 'Failed to start discovery');
@@ -1596,6 +1634,7 @@ function AddPrinterModal({
   useEffect(() => {
     return () => {
       discoveryApi.stopDiscovery().catch(() => {});
+      discoveryApi.stopSubnetScan().catch(() => {});
     };
   }, []);
 
@@ -1619,6 +1658,26 @@ function AddPrinterModal({
 
           {/* Discovery Section */}
           <div className="mb-4 pb-4 border-b border-bambu-dark-tertiary">
+            {isDocker && (
+              <div className="mb-3">
+                <label className="block text-sm text-bambu-gray mb-1">
+                  Subnet to scan
+                </label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none text-sm"
+                  value={subnet}
+                  onChange={(e) => setSubnet(e.target.value)}
+                  placeholder="192.168.1.0/24"
+                  disabled={discovering}
+                />
+                <p className="mt-1 text-xs text-bambu-gray">
+                  Docker detected. Enter your printer's subnet in CIDR notation.
+                  Requires <code className="text-bambu-green">network_mode: host</code> in docker-compose.yml.
+                </p>
+              </div>
+            )}
+
             <Button
               type="button"
               variant="secondary"
@@ -1629,12 +1688,14 @@ function AddPrinterModal({
               {discovering ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Scanning...
+                  {isDocker && scanProgress.total > 0
+                    ? `Scanning... ${scanProgress.scanned}/${scanProgress.total}`
+                    : 'Scanning...'}
                 </>
               ) : (
                 <>
                   <Search className="w-4 h-4" />
-                  Discover Printers on Network
+                  {isDocker ? 'Scan Subnet for Printers' : 'Discover Printers on Network'}
                 </>
               )}
             </Button>
@@ -1656,7 +1717,7 @@ function AddPrinterModal({
                         {printer.name || printer.serial}
                       </p>
                       <p className="text-xs text-bambu-gray truncate">
-                        {printer.model || 'Unknown'} • {printer.ip_address}
+                        {mapModelCode(printer.model) || 'Unknown'} • {printer.ip_address}
                       </p>
                     </div>
                     <ChevronDown className="w-4 h-4 text-bambu-gray -rotate-90 flex-shrink-0 ml-2" />
@@ -1667,13 +1728,13 @@ function AddPrinterModal({
 
             {discovering && (
               <p className="mt-2 text-sm text-bambu-gray text-center">
-                Scanning network...
+                {isDocker ? 'Scanning subnet for Bambu printers...' : 'Scanning network...'}
               </p>
             )}
 
             {hasScanned && !discovering && discovered.length === 0 && (
               <p className="mt-2 text-sm text-bambu-gray text-center">
-                No printers found on the network.
+                No printers found{isDocker ? ' in the specified subnet' : ' on the network'}.
               </p>
             )}
 

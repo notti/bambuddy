@@ -2190,8 +2190,22 @@ export interface DiscoveryStatus {
   running: boolean;
 }
 
+export interface DiscoveryInfo {
+  is_docker: boolean;
+  ssdp_running: boolean;
+  scan_running: boolean;
+}
+
+export interface SubnetScanStatus {
+  running: boolean;
+  scanned: number;
+  total: number;
+}
+
 // Discovery API
 export const discoveryApi = {
+  getInfo: () => request<DiscoveryInfo>('/discovery/info'),
+
   getStatus: () => request<DiscoveryStatus>('/discovery/status'),
 
   startDiscovery: (duration: number = 10) =>
@@ -2202,4 +2216,16 @@ export const discoveryApi = {
 
   getDiscoveredPrinters: () =>
     request<DiscoveredPrinter[]>('/discovery/printers'),
+
+  // Subnet scanning (for Docker environments)
+  startSubnetScan: (subnet: string, timeout: number = 1.0) =>
+    request<SubnetScanStatus>('/discovery/scan', {
+      method: 'POST',
+      body: JSON.stringify({ subnet, timeout }),
+    }),
+
+  getScanStatus: () => request<SubnetScanStatus>('/discovery/scan/status'),
+
+  stopSubnetScan: () =>
+    request<SubnetScanStatus>('/discovery/scan/stop', { method: 'POST' }),
 };
