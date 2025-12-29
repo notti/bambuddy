@@ -124,7 +124,7 @@ function ArchiveGrid({ archives }: { archives: Archive[] }) {
         >
           {archive.thumbnail_path ? (
             <img
-              src={`/api/v1/archives/${archive.id}/thumbnail`}
+              src={api.getArchiveThumbnail(archive.id)}
               alt={archive.print_name || 'Print'}
               className="w-full h-full object-cover"
             />
