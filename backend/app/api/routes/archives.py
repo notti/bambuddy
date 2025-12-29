@@ -860,7 +860,17 @@ async def get_thumbnail(archive_id: int, db: AsyncSession = Depends(get_db)):
     if not thumb_path.exists():
         raise HTTPException(404, "Thumbnail file not found")
 
-    return FileResponse(path=thumb_path, media_type="image/png")
+    # Use file modification time as ETag to bust cache
+    mtime = int(thumb_path.stat().st_mtime)
+
+    return FileResponse(
+        path=thumb_path,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-cache, must-revalidate",
+            "ETag": f'"{mtime}"',
+        },
+    )
 
 
 @router.get("/{archive_id}/timelapse")

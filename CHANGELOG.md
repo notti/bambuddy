@@ -2,13 +2,27 @@
 
 All notable changes to Bambuddy will be documented in this file.
 
+## [0.1.6b2] - 2025-12-29
+
+### Added
+- **Virtual Printer** - Bambuddy now emulates a Bambu Lab printer on your network! Send prints directly from Bambu Studio or Orca Slicer without needing a physical printer connection. Features include:
+  - SSDP discovery (printer appears automatically in slicer)
+  - Secure TLS/MQTT communication with auto-generated certificates
+  - Queue mode (prints go to pending uploads) or auto-start mode
+  - Configurable access code for authentication
+  - Works with Docker (requires `network_mode: host`)
+  - Persistent certificates across container rebuilds via volume mount
+
+### Fixed
+- **Backup/restore for virtual printer settings** - Virtual printer settings (enabled, access code, mode) now correctly persist after restore without being overwritten by auto-save
+
 ## [0.1.6b] - 2025-12-28
 
 ### Added
 - **Tasmota device discovery** - Automatically discover Tasmota smart plugs on your network. Click "Discover Tasmota Devices" in the Add Smart Plug modal to scan your local subnet. Supports devices with and without authentication.
 - **Switchbar for quick smart plug access** - New sidebar widget for controlling smart plugs without leaving the current page. Enable "Show in Switchbar" for any plug to add it to the quick access panel. Shows real-time status, power consumption, and on/off controls.
 - **Timelapse editor** - Edit timelapse videos with trim, speed adjustment (0.25x-4x), and music overlay. Uses FFmpeg for server-side processing with browser-based preview.
-- **AMS filament preview** - Reprint modal shows filament comparison between what the print requires and what's currently loaded in the AMS. Compares both type and color with visual indicators (green=match, yellow=color mismatch, orange=type mismatch).
+- **AMS filament preview** - Reprint modal shows filament comparison between what the print requires and what's currently loaded in the AMS. Compares both type and color with visual indicators (green=match, yellow=color mismatch, orange=type mismatch). Includes Re-read button to refresh AMS status from printer, fuzzy color matching for similar colors, and shows AMS slot location for each matched filament.
 - **File type badge** - Archive cards now show GCODE (green) or SOURCE (orange) badge to indicate whether the file is a sliced print-ready file or source-only.
 - **Docker printer discovery** - Subnet scanning for discovering printers when running in Docker with `network_mode: host`. Automatically detects Docker environment and shows subnet input field in Add Printer dialog.
 - **Printer model mapping** - Discovery now shows friendly model names (X1C, H2D, P1S) instead of raw SSDP codes (BL-P001, O1D, C11).

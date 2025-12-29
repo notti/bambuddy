@@ -1253,6 +1253,10 @@ export const api = {
     ),
   getPrinterStatus: (id: number) =>
     request<PrinterStatus>(`/printers/${id}/status`),
+  refreshPrinterStatus: (id: number) =>
+    request<{ status: string }>(`/printers/${id}/refresh-status`, {
+      method: 'POST',
+    }),
   connectPrinter: (id: number) =>
     request<{ connected: boolean }>(`/printers/${id}/connect`, {
       method: 'POST',
@@ -1426,7 +1430,7 @@ export const api = {
     request<{ updated: number; errors: Array<{ id: number; error: string }> }>('/archives/backfill-hashes', {
       method: 'POST',
     }),
-  getArchiveThumbnail: (id: number) => `${API_BASE}/archives/${id}/thumbnail`,
+  getArchiveThumbnail: (id: number) => `${API_BASE}/archives/${id}/thumbnail?v=${Date.now()}`,
   getArchiveDownload: (id: number) => `${API_BASE}/archives/${id}/download`,
   getArchiveGcode: (id: number) => `${API_BASE}/archives/${id}/gcode`,
   getArchiveTimelapse: (id: number) => `${API_BASE}/archives/${id}/timelapse?v=${Date.now()}`,
@@ -2337,4 +2341,78 @@ export const discoveryApi = {
 
   stopSubnetScan: () =>
     request<SubnetScanStatus>('/discovery/scan/stop', { method: 'POST' }),
+};
+
+// Virtual Printer types
+export interface VirtualPrinterStatus {
+  enabled: boolean;
+  running: boolean;
+  mode: 'immediate' | 'queue';
+  name: string;
+  serial: string;
+  model: string;
+  pending_files: number;
+}
+
+export interface VirtualPrinterSettings {
+  enabled: boolean;
+  access_code_set: boolean;
+  mode: 'immediate' | 'queue';
+  status: VirtualPrinterStatus;
+}
+
+export interface PendingUpload {
+  id: number;
+  filename: string;
+  file_size: number;
+  source_ip: string | null;
+  status: string;
+  tags: string | null;
+  notes: string | null;
+  project_id: number | null;
+  uploaded_at: string;
+}
+
+// Virtual Printer API
+export const virtualPrinterApi = {
+  getSettings: () => request<VirtualPrinterSettings>('/settings/virtual-printer'),
+
+  updateSettings: (data: {
+    enabled?: boolean;
+    access_code?: string;
+    mode?: 'immediate' | 'queue';
+  }) => {
+    const params = new URLSearchParams();
+    if (data.enabled !== undefined) params.set('enabled', String(data.enabled));
+    if (data.access_code !== undefined) params.set('access_code', data.access_code);
+    if (data.mode !== undefined) params.set('mode', data.mode);
+
+    return request<VirtualPrinterSettings>(`/settings/virtual-printer?${params.toString()}`, {
+      method: 'PUT',
+    });
+  },
+};
+
+// Pending Uploads API
+export const pendingUploadsApi = {
+  list: () => request<PendingUpload[]>('/pending-uploads/'),
+
+  getCount: () => request<{ count: number }>('/pending-uploads/count'),
+
+  get: (id: number) => request<PendingUpload>(`/pending-uploads/${id}`),
+
+  archive: (id: number, data?: { tags?: string; notes?: string; project_id?: number }) =>
+    request<{ id: number; print_name: string; filename: string }>(`/pending-uploads/${id}/archive`, {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    }),
+
+  discard: (id: number) =>
+    request<{ success: boolean }>(`/pending-uploads/${id}`, { method: 'DELETE' }),
+
+  archiveAll: () =>
+    request<{ archived: number; failed: number }>('/pending-uploads/archive-all', { method: 'POST' }),
+
+  discardAll: () =>
+    request<{ discarded: number }>('/pending-uploads/discard-all', { method: 'DELETE' }),
 };
