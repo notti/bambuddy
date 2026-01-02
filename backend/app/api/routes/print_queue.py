@@ -4,18 +4,18 @@ import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from backend.app.core.database import get_db
+from backend.app.models.archive import PrintArchive
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
-from backend.app.models.archive import PrintArchive
 from backend.app.schemas.print_queue import (
     PrintQueueItemCreate,
-    PrintQueueItemUpdate,
     PrintQueueItemResponse,
+    PrintQueueItemUpdate,
     PrintQueueReorder,
 )
 
@@ -124,9 +124,7 @@ async def update_queue_item(
     db: AsyncSession = Depends(get_db),
 ):
     """Update a queue item."""
-    result = await db.execute(
-        select(PrintQueueItem).where(PrintQueueItem.id == item_id)
-    )
+    result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == item_id))
     item = result.scalar_one_or_none()
     if not item:
         raise HTTPException(404, "Queue item not found")
@@ -138,9 +136,7 @@ async def update_queue_item(
 
     # Validate new printer_id if being changed
     if "printer_id" in update_data:
-        result = await db.execute(
-            select(Printer).where(Printer.id == update_data["printer_id"])
-        )
+        result = await db.execute(select(Printer).where(Printer.id == update_data["printer_id"]))
         if not result.scalar_one_or_none():
             raise HTTPException(400, "Printer not found")
 
@@ -157,9 +153,7 @@ async def update_queue_item(
 @router.delete("/{item_id}")
 async def delete_queue_item(item_id: int, db: AsyncSession = Depends(get_db)):
     """Remove an item from the queue."""
-    result = await db.execute(
-        select(PrintQueueItem).where(PrintQueueItem.id == item_id)
-    )
+    result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == item_id))
     item = result.scalar_one_or_none()
     if not item:
         raise HTTPException(404, "Queue item not found")
@@ -181,9 +175,7 @@ async def reorder_queue(
 ):
     """Bulk update positions for queue items."""
     for reorder_item in data.items:
-        result = await db.execute(
-            select(PrintQueueItem).where(PrintQueueItem.id == reorder_item.id)
-        )
+        result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == reorder_item.id))
         item = result.scalar_one_or_none()
         if item and item.status == "pending":
             item.position = reorder_item.position
@@ -196,9 +188,7 @@ async def reorder_queue(
 @router.post("/{item_id}/cancel")
 async def cancel_queue_item(item_id: int, db: AsyncSession = Depends(get_db)):
     """Cancel a pending queue item."""
-    result = await db.execute(
-        select(PrintQueueItem).where(PrintQueueItem.id == item_id)
-    )
+    result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == item_id))
     item = result.scalar_one_or_none()
     if not item:
         raise HTTPException(404, "Queue item not found")
@@ -220,14 +210,13 @@ async def stop_queue_item(
     db: AsyncSession = Depends(get_db),
 ):
     """Stop an actively printing queue item."""
-    from backend.app.services.printer_manager import printer_manager
-    from backend.app.services.tasmota import tasmota_service
-    from backend.app.models.smart_plug import SmartPlug
     import asyncio
 
-    result = await db.execute(
-        select(PrintQueueItem).where(PrintQueueItem.id == item_id)
-    )
+    from backend.app.models.smart_plug import SmartPlug
+    from backend.app.services.printer_manager import printer_manager
+    from backend.app.services.tasmota import tasmota_service
+
+    result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == item_id))
     item = result.scalar_one_or_none()
     if not item:
         raise HTTPException(404, "Queue item not found")
@@ -257,9 +246,7 @@ async def stop_queue_item(
     # Get smart plug info if auto-off is enabled
     plug_ip = None
     if auto_off_after:
-        result = await db.execute(
-            select(SmartPlug).where(SmartPlug.printer_id == printer_id)
-        )
+        result = await db.execute(select(SmartPlug).where(SmartPlug.printer_id == printer_id))
         plug = result.scalar_one_or_none()
         if plug and plug.enabled:
             plug_ip = plug.ip_address
@@ -268,15 +255,15 @@ async def stop_queue_item(
 
     # Schedule background task for cooldown + power off
     if plug_ip:
+
         async def cooldown_and_poweroff():
             logger.info(f"Auto-off: Waiting for printer {printer_id} to cool down before power off...")
             await printer_manager.wait_for_cooldown(printer_id, target_temp=50.0, timeout=600)
             # Re-fetch plug since we're in a new async context
             from backend.app.core.database import async_session
+
             async with async_session() as new_db:
-                result = await new_db.execute(
-                    select(SmartPlug).where(SmartPlug.printer_id == printer_id)
-                )
+                result = await new_db.execute(select(SmartPlug).where(SmartPlug.printer_id == printer_id))
                 plug = result.scalar_one_or_none()
                 if plug and plug.enabled:
                     logger.info(f"Auto-off: Powering off printer {printer_id}")

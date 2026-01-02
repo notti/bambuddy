@@ -1,5 +1,6 @@
-from datetime import datetime, timezone
-from typing import Literal, Annotated
+from datetime import datetime
+from typing import Annotated, Literal
+
 from pydantic import BaseModel, PlainSerializer
 
 

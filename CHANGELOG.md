@@ -41,6 +41,17 @@ All notable changes to Bambuddy will be documented in this file.
   - Light and dark theme support
   - Close with ESC key or click outside
   - Requires "Exclude Objects" option enabled in slicer
+- **Interactive API Browser** - Explore and test all API endpoints directly in Bambuddy:
+  - Settings → API Keys now includes a full API browser
+  - Fetches OpenAPI schema automatically
+  - Endpoints grouped by category (printers, archives, settings, etc.)
+  - Expandable sections with color-coded method badges (GET, POST, PATCH, DELETE)
+  - Parameter inputs for path, query, and JSON body
+  - Auto-populates request body with schema examples
+  - Live API execution with response display (status, timing, formatted JSON)
+  - Paste API key to test authenticated endpoints
+  - Search to filter endpoints across all categories
+  - Two-column layout: API key management + API browser side-by-side
 - **AMS slot RFID re-read** - Re-read RFID data for individual AMS slots:
   - Menu button (⋮) appears on hover over AMS slots
   - "Re-read RFID" option triggers filament info refresh
