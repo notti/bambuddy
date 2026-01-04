@@ -23,9 +23,22 @@ All notable changes to Bambuddy will be documented in this file.
   - Model change automatically restarts the virtual printer (no manual disable/enable needed)
   - Models sorted alphabetically in dropdown
 - **Pending upload delete confirmation** - Confirmation modal when discarding pending uploads in queue review mode
+- **Tasmota admin link** - Direct link to Tasmota web interface on smart plug cards
+- **Debug logging** - Added debug logging for printer hour counter and AMS slot mapping
 
 ### Fixed
 - **Camera stream reconnection** - Improved detection of stuck camera streams with automatic reconnection
+- **Spoolman sync** - Fixed sync issues with Spoolman integration
+- **Archive card context menu** - Fixed context menu positioning issues (#46)
+- **Printer card cover image** - Fixed wrong cover image displayed for multi-plate print files
+- **Skip objects modal** - Fixed object ID markers not correctly positioned over build plate preview
+- **Active AMS slot display (H2D)** - Fixed incorrect slot display on H2D printers with multiple AMS units:
+  - Now parses `snow` field from `device.extruder.info` which contains actual AMS ID
+  - Previously picked first AMS on the extruder, causing wrong display when multiple AMS connected
+  - Example: Switching from B2 to C1 now correctly shows C1 instead of A1
+- **Spoolman link function** - Improved "Link to Spoolman" in AMS slot detail modal
+- **GCode viewer** - Minor improvements to GCode visualization
+- **Cover image retrieval** - Improved reliability of cover image extraction
 - **Virtual printer SSDP model codes** - Corrected model codes for slicer compatibility:
   - C11=P1P, C12=P1S (were incorrectly swapped)
   - N7=P2S (was incorrectly using C13 which is X1E)
