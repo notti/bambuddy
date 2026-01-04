@@ -161,13 +161,20 @@ class VirtualPrinterManager:
         model_changed = new_model != self._model
         old_model = self._model
 
+        logger.debug(
+            f"configure() called: enabled={enabled}, self._enabled={self._enabled}, "
+            f"model={model}, new_model={new_model}, old_model={old_model}, model_changed={model_changed}"
+        )
+
         self._access_code = access_code
         self._mode = mode
         self._model = new_model
 
         if enabled and not self._enabled:
+            logger.info("Starting virtual printer (was disabled)")
             await self._start()
         elif not enabled and self._enabled:
+            logger.info("Stopping virtual printer (was enabled)")
             await self._stop()
         elif enabled and self._enabled and model_changed:
             # Model changed while running - restart services
@@ -177,6 +184,10 @@ class VirtualPrinterManager:
             await asyncio.sleep(0.5)
             await self._start()
             logger.info("Virtual printer restarted with new model")
+        else:
+            logger.debug(
+                f"No state change needed (enabled={enabled}, self._enabled={self._enabled}, model_changed={model_changed})"
+            )
 
         self._enabled = enabled
 
