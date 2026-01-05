@@ -49,8 +49,9 @@ SSDP_PORT = 2021  # Bambu Lab uses non-standard port
 # Bambu Lab SSDP search target
 BAMBU_SEARCH_TARGET = "urn:bambulab-com:device:3dprinter:1"
 
-# Virtual printer serial to exclude from discovery (Bambuddy's own virtual printer)
-VIRTUAL_PRINTER_SERIAL = "00M09A391800001"
+# Virtual printer serial suffix to exclude from discovery (Bambuddy's own virtual printer)
+# All virtual printer serials end with this suffix, regardless of model
+VIRTUAL_PRINTER_SERIAL_SUFFIX = "391800001"
 
 # SSDP M-SEARCH message
 SSDP_MSEARCH = (
@@ -271,8 +272,8 @@ class PrinterDiscoveryService:
 
         serial = usn_match.group(1).strip()
 
-        # Skip Bambuddy's own virtual printer
-        if serial == VIRTUAL_PRINTER_SERIAL:
+        # Skip Bambuddy's own virtual printer (any model variant)
+        if serial.endswith(VIRTUAL_PRINTER_SERIAL_SUFFIX):
             logger.debug(f"Ignoring Bambuddy virtual printer at {ip_address}")
             return
 
@@ -403,8 +404,8 @@ class SubnetScanner:
         # Try to get printer info via SSDP unicast
         serial, name, model = await self._get_printer_info_ssdp(ip, timeout)
 
-        # Skip Bambuddy's own virtual printer
-        if serial == VIRTUAL_PRINTER_SERIAL:
+        # Skip Bambuddy's own virtual printer (any model variant)
+        if serial and serial.endswith(VIRTUAL_PRINTER_SERIAL_SUFFIX):
             logger.debug(f"Ignoring Bambuddy virtual printer at {ip}")
             return
 
