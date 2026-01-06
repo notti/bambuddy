@@ -1626,19 +1626,13 @@ async def track_printer_runtime():
                         # Calculate time since last update
                         if printer.last_runtime_update:
                             elapsed = (now - printer.last_runtime_update).total_seconds()
-                            # Sanity check: don't add more than 2x the interval (handles server restarts)
-                            if elapsed > 0 and elapsed < RUNTIME_TRACKING_INTERVAL * 2:
+                            if elapsed > 0:
                                 printer.runtime_seconds += int(elapsed)
                                 updated_count += 1
                                 needs_commit = True
                                 logger.debug(
                                     f"[{printer.name}] Runtime tracking: added {int(elapsed)}s, "
                                     f"total={printer.runtime_seconds}s ({printer.runtime_seconds / 3600:.2f}h)"
-                                )
-                            else:
-                                logger.warning(
-                                    f"[{printer.name}] Runtime tracking: skipped elapsed={elapsed:.1f}s "
-                                    f"(outside valid range 0-{RUNTIME_TRACKING_INTERVAL * 2}s)"
                                 )
                         else:
                             # First time seeing printer active - need to commit to save timestamp
