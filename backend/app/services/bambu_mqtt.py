@@ -158,6 +158,8 @@ class PrinterState:
     big_fan1_speed: int | None = None  # Auxiliary fan
     big_fan2_speed: int | None = None  # Chamber/exhaust fan
     heatbreak_fan_speed: int | None = None  # Hotend heatbreak fan
+    # Firmware version info (from info.module[name="ota"].sw_ver)
+    firmware_version: str | None = None
 
 
 # Stage name mapping from BambuStudio DeviceManager.cpp
@@ -323,6 +325,8 @@ class BambuMQTTClient:
             client.subscribe(self.topic_subscribe)
             # Request full status update (includes nozzle info in push_status response)
             self._request_push_all()
+            # Request firmware version info
+            self._request_version()
             # Note: get_accessories returns stale nozzle data on H2D, so we don't use it.
             # The correct nozzle data comes from push_status.
             # Prime K-profile request (Bambu printers often ignore first request)
@@ -396,6 +400,12 @@ class BambuMQTTClient:
             system_data = payload["system"]
             logger.info(f"[{self.serial_number}] Received system data: {system_data}")
             self._handle_system_response(system_data)
+
+        # Handle info responses (firmware version info from get_version command)
+        if "info" in payload:
+            info_data = payload["info"]
+            if isinstance(info_data, dict) and info_data.get("command") == "get_version":
+                self._handle_version_info(info_data)
 
         # Parse WiFi signal at top level (some printers send it here)
         if "wifi_signal" in payload:
@@ -486,6 +496,39 @@ class BambuMQTTClient:
             # because it returns stale values (e.g., 'stainless_steel' when the
             # actual nozzle is 'HH01' hardened steel high-flow)
             logger.info(f"[{self.serial_number}] Accessories response (not used for nozzle data): {data}")
+
+    def _handle_version_info(self, data: dict):
+        """Handle version info response from get_version command.
+
+        Parses firmware version from the 'ota' module in the module list.
+        Message format:
+        {
+            "command": "get_version",
+            "module": [
+                {"name": "ota", "sw_ver": "01.08.05.00"},
+                {"name": "rv1126", "sw_ver": "00.00.14.74"},
+                ...
+            ]
+        }
+        """
+        modules = data.get("module", [])
+        if not isinstance(modules, list):
+            return
+
+        for module in modules:
+            if not isinstance(module, dict):
+                continue
+            if module.get("name") == "ota":
+                version = module.get("sw_ver")
+                if version:
+                    old_version = self.state.firmware_version
+                    self.state.firmware_version = version
+                    if old_version != version:
+                        logger.info(f"[{self.serial_number}] Firmware version: {version}")
+                    # Trigger state change callback
+                    if self.on_state_change:
+                        self.on_state_change(self.state)
+                break
 
     def _parse_xcam_data(self, xcam_data):
         """Parse xcam data for camera settings and AI detection options."""
@@ -1766,6 +1809,19 @@ class BambuMQTTClient:
             message = {"pushing": {"command": "pushall"}}
             self._client.publish(self.topic_publish, json.dumps(message), qos=1)
 
+    def _request_version(self):
+        """Request firmware version info from printer."""
+        if self._client:
+            self._sequence_id += 1
+            message = {
+                "info": {
+                    "sequence_id": str(self._sequence_id),
+                    "command": "get_version",
+                }
+            }
+            logger.debug(f"[{self.serial_number}] Requesting firmware version info")
+            self._client.publish(self.topic_publish, json.dumps(message), qos=1)
+
     def request_status_update(self) -> bool:
         """Request a full status update from the printer (public API).
 
@@ -1845,29 +1901,81 @@ class BambuMQTTClient:
         self._client.connect_async(self.ip_address, self.MQTT_PORT, keepalive=15)
         self._client.loop_start()
 
-    def start_print(self, filename: str, plate_id: int = 1):
+    def start_print(
+        self,
+        filename: str,
+        plate_id: int = 1,
+        ams_mapping: list[int] | None = None,
+        bed_levelling: bool = True,
+        flow_cali: bool = False,
+        vibration_cali: bool = True,
+        layer_inspect: bool = False,
+        timelapse: bool = False,
+        use_ams: bool = True,
+    ):
         """Start a print job on the printer.
 
         The file should already be uploaded to /cache/ on the printer via FTP.
+
+        Args:
+            filename: Name of the uploaded file
+            plate_id: Plate number to print (default 1)
+            ams_mapping: List of tray IDs for each filament slot in the 3MF.
+                         Global tray ID = (ams_id * 4) + slot_id, external = 254
+            timelapse: Record timelapse video
+            bed_levelling: Auto bed levelling before print
+            flow_cali: Flow/pressure advance calibration
+            vibration_cali: Vibration compensation calibration
+            layer_inspect: First layer AI inspection
+            use_ams: Use AMS for automatic filament changes
         """
         if self._client and self.state.connected:
-            # Bambu print command format
-            # Based on: https://github.com/darkorb/bambu-ftp-and-print
+            # Bambu print command format - matches Bambu Studio's format
+            # Build ams_mapping2 from ams_mapping (detailed format with ams_id/slot_id)
+            ams_mapping2 = []
+            if ams_mapping is not None:
+                for tray_id in ams_mapping:
+                    if tray_id == -1 or tray_id == 255:
+                        ams_mapping2.append({"ams_id": 255, "slot_id": 255})
+                    else:
+                        # Global tray ID = (ams_id * 4) + slot_id
+                        ams_id = tray_id // 4
+                        slot_id = tray_id % 4
+                        ams_mapping2.append({"ams_id": ams_id, "slot_id": slot_id})
+
             command = {
                 "print": {
-                    "sequence_id": 0,
+                    "sequence_id": "20000",
                     "command": "project_file",
                     "param": f"Metadata/plate_{plate_id}.gcode",
-                    "subtask_name": filename,
                     "url": f"ftp://{filename}",
-                    "timelapse": False,
-                    "bed_leveling": True,
-                    "flow_cali": True,
-                    "vibration_cali": True,
-                    "layer_inspect": False,
-                    "use_ams": True,
+                    "file": filename,
+                    "md5": "",
+                    "bed_type": "auto",
+                    "timelapse": timelapse,
+                    "bed_leveling": bed_levelling,
+                    "auto_bed_leveling": 1 if bed_levelling else 0,
+                    "flow_cali": flow_cali,
+                    "vibration_cali": vibration_cali,
+                    "layer_inspect": layer_inspect,
+                    "use_ams": use_ams,
+                    "cfg": "0",
+                    "extrude_cali_flag": 0,
+                    "extrude_cali_manual_mode": 0,
+                    "nozzle_offset_cali": 2,
+                    "subtask_name": filename.replace(".3mf", "").replace(".gcode", ""),
+                    "profile_id": "0",
+                    "project_id": "0",
+                    "subtask_id": "0",
+                    "task_id": "0",
                 }
             }
+
+            # Add AMS mapping if provided
+            if ams_mapping is not None:
+                command["print"]["ams_mapping"] = ams_mapping
+                command["print"]["ams_mapping2"] = ams_mapping2
+
             logger.info(f"[{self.serial_number}] Sending print command: {json.dumps(command)}")
             self._client.publish(self.topic_publish, json.dumps(command), qos=1)
             return True

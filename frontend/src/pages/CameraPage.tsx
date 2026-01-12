@@ -46,39 +46,36 @@ export function CameraPage() {
   }, [printer]);
 
   // Cleanup on unmount - stop the camera stream
+  // Track if we've already sent the stop signal to avoid duplicate calls
+  const stopSentRef = useRef(false);
+
   useEffect(() => {
     const stopUrl = `/api/v1/printers/${id}/camera/stop`;
+    stopSentRef.current = false;
+
+    const sendStopOnce = () => {
+      if (id > 0 && !stopSentRef.current) {
+        stopSentRef.current = true;
+        navigator.sendBeacon(stopUrl);
+      }
+    };
 
     // Handle page unload/close with sendBeacon (more reliable than fetch on unload)
     const handleBeforeUnload = () => {
-      if (id > 0) {
-        navigator.sendBeacon(stopUrl);
-      }
-    };
-
-    // Handle visibility change (tab hidden/closed)
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden' && id > 0) {
-        navigator.sendBeacon(stopUrl);
-      }
+      sendStopOnce();
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
 
-      // Clear the image source
+      // Clear the image source first to stop the stream
       if (imgRef.current) {
         imgRef.current.src = '';
       }
-      // Call the stop endpoint to terminate ffmpeg processes
-      if (id > 0) {
-        // Use sendBeacon for reliability during unmount
-        navigator.sendBeacon(stopUrl);
-      }
+      // Send stop signal only once
+      sendStopOnce();
     };
   }, [id]);
 
@@ -93,19 +90,31 @@ export function CameraPage() {
     }
   }, [streamMode, streamLoading, imageKey, transitioning]);
 
-  // Fullscreen change listener
+  // Fullscreen change listener - refresh stream after fullscreen transition
   useEffect(() => {
     const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+      const nowFullscreen = !!document.fullscreenElement;
+      setIsFullscreen(nowFullscreen);
+
+      // Refresh stream after fullscreen transition to prevent stall
+      if (streamMode === 'stream' && !transitioning) {
+        // Clear image src first, then set new key after delay
+        if (imgRef.current) {
+          imgRef.current.src = '';
+        }
+        setTimeout(() => {
+          setStreamLoading(true);
+          setImageKey(Date.now());
+        }, 200);
+      }
     };
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
-  }, []);
+  }, [streamMode, transitioning]);
 
-  // Save window size and position when user resizes or moves (only for popup windows)
+  // Save window size and position when user resizes or moves
+  // Works for both popup windows and standalone camera pages
   useEffect(() => {
-    if (!window.opener) return;
-
     let saveTimeout: NodeJS.Timeout;
     const saveWindowState = () => {
       // Debounce to avoid saving during drag
@@ -121,20 +130,9 @@ export function CameraPage() {
     };
 
     window.addEventListener('resize', saveWindowState);
-    // Use interval to detect position changes (no native 'move' event)
-    const positionInterval = setInterval(() => {
-      const saved = localStorage.getItem('cameraWindowState');
-      if (saved) {
-        const state = JSON.parse(saved);
-        if (state.left !== window.screenX || state.top !== window.screenY) {
-          saveWindowState();
-        }
-      }
-    }, 1000);
 
     return () => {
       clearTimeout(saveTimeout);
-      clearInterval(positionInterval);
       window.removeEventListener('resize', saveWindowState);
     };
   }, []);
@@ -199,8 +197,9 @@ export function CameraPage() {
 
   // Stall detection - periodically check if stream is still receiving frames
   useEffect(() => {
-    if (streamMode !== 'stream' || streamLoading || streamError || isReconnecting || transitioning) {
-      // Clear stall check when not actively streaming
+    // Only skip stall check during initial load, reconnecting, or transitioning
+    // Continue checking even during streamError to detect recovery
+    if (streamMode !== 'stream' || streamLoading || isReconnecting || transitioning) {
       if (stallCheckIntervalRef.current) {
         clearInterval(stallCheckIntervalRef.current);
         stallCheckIntervalRef.current = null;
@@ -214,14 +213,15 @@ export function CameraPage() {
         const response = await fetch(`/api/v1/printers/${id}/camera/status`);
         if (response.ok) {
           const status = await response.json();
-          if (status.stalled) {
-            console.log('Stream stall detected, auto-reconnecting...');
-            // Trigger reconnect
+          // Trigger reconnect if:
+          // 1. Backend reports stall (no frames for 10+ seconds)
+          // 2. OR stream is not active anymore (process died)
+          if (status.stalled || (!status.active && !streamError)) {
+            console.log(`Stream issue detected: stalled=${status.stalled}, active=${status.active}, reconnecting...`);
             if (stallCheckIntervalRef.current) {
               clearInterval(stallCheckIntervalRef.current);
               stallCheckIntervalRef.current = null;
             }
-            // Use the same reconnect logic as stream error
             setStreamLoading(false);
             attemptReconnect();
           }
@@ -263,8 +263,8 @@ export function CameraPage() {
       clearInterval(countdownIntervalRef.current);
     }
 
-    // Auto-resize popup window to fit video content (only if no saved preference)
-    if (window.opener && imgRef.current && !localStorage.getItem('cameraWindowState')) {
+    // Auto-resize window to fit video content (only if no saved preference)
+    if (imgRef.current && !localStorage.getItem('cameraWindowState')) {
       const img = imgRef.current;
       const videoWidth = img.naturalWidth;
       const videoHeight = img.naturalHeight;
@@ -281,7 +281,11 @@ export function CameraPage() {
         const targetWidth = videoWidth + padding + chromeWidth;
         const targetHeight = videoHeight + headerHeight + padding + chromeHeight;
 
-        window.resizeTo(targetWidth, targetHeight);
+        try {
+          window.resizeTo(targetWidth, targetHeight);
+        } catch {
+          // resizeTo may not be allowed in all contexts
+        }
       }
     }
   };

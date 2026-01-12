@@ -13,7 +13,7 @@ from backend.app.models.archive import PrintArchive
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
 from backend.app.models.smart_plug import SmartPlug
-from backend.app.services.bambu_ftp import upload_file_async
+from backend.app.services.bambu_ftp import get_ftp_retry_settings, upload_file_async, with_ftp_retry
 from backend.app.services.printer_manager import printer_manager
 from backend.app.services.tasmota import tasmota_service
 
@@ -271,13 +271,32 @@ class PrintScheduler:
         remote_filename = archive.filename
         remote_path = f"/cache/{remote_filename}"
 
+        # Get FTP retry settings
+        ftp_retry_enabled, ftp_retry_count, ftp_retry_delay, ftp_timeout = await get_ftp_retry_settings()
+
         try:
-            uploaded = await upload_file_async(
-                printer.ip_address,
-                printer.access_code,
-                file_path,
-                remote_path,
-            )
+            if ftp_retry_enabled:
+                uploaded = await with_ftp_retry(
+                    upload_file_async,
+                    printer.ip_address,
+                    printer.access_code,
+                    file_path,
+                    remote_path,
+                    socket_timeout=ftp_timeout,
+                    printer_model=printer.model,
+                    max_retries=ftp_retry_count,
+                    retry_delay=ftp_retry_delay,
+                    operation_name=f"Upload print to {printer.name}",
+                )
+            else:
+                uploaded = await upload_file_async(
+                    printer.ip_address,
+                    printer.access_code,
+                    file_path,
+                    remote_path,
+                    socket_timeout=ftp_timeout,
+                    printer_model=printer.model,
+                )
         except Exception as e:
             uploaded = False
             logger.error(f"Queue item {item.id}: FTP error: {e}")
@@ -296,8 +315,22 @@ class PrintScheduler:
 
         register_expected_print(item.printer_id, remote_filename, archive.id)
 
-        # Start the print
-        started = printer_manager.start_print(item.printer_id, remote_filename)
+        # Parse AMS mapping if stored
+        ams_mapping = None
+        if item.ams_mapping:
+            try:
+                import json
+
+                ams_mapping = json.loads(item.ams_mapping)
+            except json.JSONDecodeError:
+                logger.warning(f"Queue item {item.id}: Invalid AMS mapping JSON, ignoring")
+
+        # Start the print with AMS mapping if available
+        started = printer_manager.start_print(
+            item.printer_id,
+            remote_filename,
+            ams_mapping=ams_mapping,
+        )
 
         if started:
             item.status = "printing"

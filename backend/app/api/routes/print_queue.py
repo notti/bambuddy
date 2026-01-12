@@ -1,5 +1,6 @@
 """API routes for print queue management."""
 
+import json
 import logging
 from datetime import datetime
 
@@ -26,7 +27,32 @@ router = APIRouter(prefix="/queue", tags=["queue"])
 
 def _enrich_response(item: PrintQueueItem) -> PrintQueueItemResponse:
     """Add nested archive/printer info to response."""
-    response = PrintQueueItemResponse.model_validate(item)
+    # Parse ams_mapping from JSON string BEFORE model_validate
+    ams_mapping_parsed = None
+    if item.ams_mapping:
+        try:
+            ams_mapping_parsed = json.loads(item.ams_mapping)
+        except json.JSONDecodeError:
+            ams_mapping_parsed = None
+
+    # Create response with parsed ams_mapping
+    item_dict = {
+        "id": item.id,
+        "printer_id": item.printer_id,
+        "archive_id": item.archive_id,
+        "position": item.position,
+        "scheduled_time": item.scheduled_time,
+        "require_previous_success": item.require_previous_success,
+        "auto_off_after": item.auto_off_after,
+        "manual_start": item.manual_start,
+        "ams_mapping": ams_mapping_parsed,
+        "status": item.status,
+        "started_at": item.started_at,
+        "completed_at": item.completed_at,
+        "error_message": item.error_message,
+        "created_at": item.created_at,
+    }
+    response = PrintQueueItemResponse(**item_dict)
     if item.archive:
         response.archive_name = item.archive.print_name or item.archive.filename
         response.archive_thumbnail = item.archive.thumbnail_path
@@ -90,6 +116,7 @@ async def add_to_queue(
         require_previous_success=data.require_previous_success,
         auto_off_after=data.auto_off_after,
         manual_start=data.manual_start,
+        ams_mapping=json.dumps(data.ams_mapping) if data.ams_mapping else None,
         position=max_pos + 1,
         status="pending",
     )
@@ -140,6 +167,10 @@ async def update_queue_item(
         result = await db.execute(select(Printer).where(Printer.id == update_data["printer_id"]))
         if not result.scalar_one_or_none():
             raise HTTPException(400, "Printer not found")
+
+    # Serialize ams_mapping to JSON for TEXT column storage
+    if "ams_mapping" in update_data:
+        update_data["ams_mapping"] = json.dumps(update_data["ams_mapping"]) if update_data["ams_mapping"] else None
 
     for field, value in update_data.items():
         setattr(item, field, value)

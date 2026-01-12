@@ -204,6 +204,7 @@ export interface Archive {
   source_3mf_path: string | null;
   duplicates: ArchiveDuplicate[] | null;
   duplicate_count: number;
+  object_count: number | null;
   print_name: string | null;
   print_time_seconds: number | null;
   actual_time_seconds: number | null;  // Computed from started_at/completed_at
@@ -563,6 +564,11 @@ export interface AppSettings {
   light_style: 'classic' | 'glow' | 'vibrant';
   light_background: 'neutral' | 'warm' | 'cool';
   light_accent: 'green' | 'teal' | 'blue' | 'orange' | 'purple' | 'red';
+  // FTP retry settings
+  ftp_retry_enabled: boolean;
+  ftp_retry_count: number;
+  ftp_retry_delay: number;
+  ftp_timeout: number;
 }
 
 export type AppSettingsUpdate = Partial<AppSettings>;
@@ -790,6 +796,7 @@ export interface PrintQueueItem {
   require_previous_success: boolean;
   auto_off_after: boolean;
   manual_start: boolean;  // Requires manual trigger to start (staged)
+  ams_mapping: number[] | null;  // AMS slot mapping for multi-color prints
   status: 'pending' | 'printing' | 'completed' | 'failed' | 'skipped' | 'cancelled';
   started_at: string | null;
   completed_at: string | null;
@@ -808,6 +815,7 @@ export interface PrintQueueItemCreate {
   require_previous_success?: boolean;
   auto_off_after?: boolean;
   manual_start?: boolean;  // Requires manual trigger to start (staged)
+  ams_mapping?: number[] | null;  // AMS slot mapping for multi-color prints
 }
 
 export interface PrintQueueItemUpdate {
@@ -817,6 +825,7 @@ export interface PrintQueueItemUpdate {
   require_previous_success?: boolean;
   auto_off_after?: boolean;
   manual_start?: boolean;
+  ams_mapping?: number[];
 }
 
 // MQTT Logging types
@@ -1189,6 +1198,7 @@ export interface MaintenanceType {
   default_interval_hours: number;
   interval_type: 'hours' | 'days';  // "hours" = print hours, "days" = calendar days
   icon: string | null;
+  wiki_url: string | null;  // Documentation link
   is_system: boolean;
   created_at: string;
 }
@@ -1199,15 +1209,18 @@ export interface MaintenanceTypeCreate {
   default_interval_hours?: number;
   interval_type?: 'hours' | 'days';
   icon?: string | null;
+  wiki_url?: string | null;
 }
 
 export interface MaintenanceStatus {
   id: number;
   printer_id: number;
   printer_name: string;
+  printer_model: string | null;
   maintenance_type_id: number;
   maintenance_type_name: string;
   maintenance_type_icon: string | null;
+  maintenance_type_wiki_url: string | null;  // Custom wiki URL from type
   enabled: boolean;
   interval_hours: number;  // For hours type: print hours; for days type: number of days
   interval_type: 'hours' | 'days';
@@ -1224,6 +1237,7 @@ export interface MaintenanceStatus {
 export interface PrinterMaintenanceOverview {
   printer_id: number;
   printer_name: string;
+  printer_model: string | null;
   total_print_hours: number;
   maintenance_items: MaintenanceStatus[];
   due_count: number;
@@ -1319,6 +1333,12 @@ export const api = {
     }),
   resumePrint: (printerId: number) =>
     request<{ success: boolean; message: string }>(`/printers/${printerId}/print/resume`, {
+      method: 'POST',
+    }),
+
+  // Chamber Light Control
+  setChamberLight: (printerId: number, on: boolean) =>
+    request<{ success: boolean; message: string }>(`/printers/${printerId}/chamber-light?on=${on}`, {
       method: 'POST',
     }),
 
@@ -1702,10 +1722,26 @@ export const api = {
         used_meters: number;
       }>;
     }>(`/archives/${archiveId}/filament-requirements`),
-  reprintArchive: (archiveId: number, printerId: number) =>
+  reprintArchive: (
+    archiveId: number,
+    printerId: number,
+    options?: {
+      ams_mapping?: number[];
+      timelapse?: boolean;
+      bed_levelling?: boolean;
+      flow_cali?: boolean;
+      vibration_cali?: boolean;
+      layer_inspect?: boolean;
+      use_ams?: boolean;
+    }
+  ) =>
     request<{ status: string; printer_id: number; archive_id: number; filename: string }>(
       `/archives/${archiveId}/reprint?printer_id=${printerId}`,
-      { method: 'POST' }
+      {
+        method: 'POST',
+        headers: options ? { 'Content-Type': 'application/json' } : undefined,
+        body: options ? JSON.stringify(options) : undefined,
+      }
     ),
   uploadArchive: async (file: File, printerId?: number): Promise<Archive> => {
     const formData = new FormData();
@@ -2525,4 +2561,100 @@ export const pendingUploadsApi = {
 
   discardAll: () =>
     request<{ discarded: number }>('/pending-uploads/discard-all', { method: 'DELETE' }),
+};
+
+// Firmware API Types
+export interface FirmwareUpdateInfo {
+  printer_id: number;
+  printer_name: string;
+  model: string | null;
+  current_version: string | null;
+  latest_version: string | null;
+  update_available: boolean;
+  download_url: string | null;
+  release_notes: string | null;
+}
+
+export interface FirmwareUploadPrepare {
+  can_proceed: boolean;
+  sd_card_present: boolean;
+  sd_card_free_space: number;
+  firmware_size: number;
+  space_sufficient: boolean;
+  update_available: boolean;
+  current_version: string | null;
+  latest_version: string | null;
+  firmware_filename: string | null;
+  errors: string[];
+}
+
+export interface FirmwareUploadStatus {
+  status: 'idle' | 'preparing' | 'downloading' | 'uploading' | 'complete' | 'error';
+  progress: number;
+  message: string;
+  error: string | null;
+  firmware_filename: string | null;
+  firmware_version: string | null;
+}
+
+// Firmware API
+export const firmwareApi = {
+  checkUpdates: () =>
+    request<{ updates: FirmwareUpdateInfo[]; updates_available: number }>('/firmware/updates'),
+
+  checkPrinterUpdate: (printerId: number) =>
+    request<FirmwareUpdateInfo>(`/firmware/updates/${printerId}`),
+
+  prepareUpload: (printerId: number) =>
+    request<FirmwareUploadPrepare>(`/firmware/updates/${printerId}/prepare`),
+
+  startUpload: (printerId: number) =>
+    request<{ started: boolean; message: string }>(`/firmware/updates/${printerId}/upload`, {
+      method: 'POST',
+    }),
+
+  getUploadStatus: (printerId: number) =>
+    request<FirmwareUploadStatus>(`/firmware/updates/${printerId}/upload/status`),
+};
+
+// Support types
+export interface DebugLoggingState {
+  enabled: boolean;
+  enabled_at: string | null;
+  duration_seconds: number | null;
+}
+
+// Support API
+export const supportApi = {
+  getDebugLoggingState: () =>
+    request<DebugLoggingState>('/support/debug-logging'),
+
+  setDebugLogging: (enabled: boolean) =>
+    request<DebugLoggingState>('/support/debug-logging', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  downloadSupportBundle: async () => {
+    const response = await fetch(`${API_BASE}/support/bundle`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    // Get filename from Content-Disposition header or use default
+    const disposition = response.headers.get('Content-Disposition');
+    const filenameMatch = disposition?.match(/filename=(.+)/);
+    const filename = filenameMatch ? filenameMatch[1] : 'bambuddy-support.zip';
+
+    // Download the blob
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  },
 };

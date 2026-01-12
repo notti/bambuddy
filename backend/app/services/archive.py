@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import re
 import shutil
 import zipfile
@@ -14,6 +15,8 @@ from backend.app.core.config import settings
 from backend.app.models.archive import PrintArchive
 from backend.app.models.filament import Filament
 from backend.app.models.printer import Printer
+
+logger = logging.getLogger(__name__)
 
 
 class ThreeMFParser:
@@ -393,8 +396,8 @@ def extract_printable_objects_from_3mf(
                     break
 
             # Load position data from plate_N.json if we need positions
-            # Build a lookup by name since bbox_objects.id != slice_info identify_id
-            bbox_by_name: dict[str, list] = {}
+            # Build a lookup by name - use list to handle duplicate names
+            bbox_by_name: dict[str, list[list]] = {}
             if include_positions:
                 plate_json_path = f"Metadata/plate_{plate_idx}.json"
                 if plate_json_path in zf.namelist():
@@ -406,7 +409,9 @@ def extract_printable_objects_from_3mf(
                             obj_name = bbox_obj.get("name")
                             bbox = bbox_obj.get("bbox", [])
                             if obj_name and len(bbox) >= 4:
-                                bbox_by_name[obj_name] = bbox
+                                if obj_name not in bbox_by_name:
+                                    bbox_by_name[obj_name] = []
+                                bbox_by_name[obj_name].append(bbox)
                     except (json.JSONDecodeError, KeyError):
                         pass
 
@@ -421,9 +426,10 @@ def extract_printable_objects_from_3mf(
                         obj_id = int(identify_id)
                         if include_positions:
                             x, y = None, None
-                            # Match by name to get bbox coordinates
-                            bbox = bbox_by_name.get(name)
-                            if bbox:
+                            # Match by name - pop first bbox to handle duplicates
+                            bboxes = bbox_by_name.get(name)
+                            if bboxes:
+                                bbox = bboxes.pop(0)
                                 # Calculate center from bbox [x_min, y_min, x_max, y_max]
                                 x = (bbox[0] + bbox[2]) / 2
                                 y = (bbox[1] + bbox[3]) / 2
@@ -917,11 +923,47 @@ class ArchiveService:
         if not archive:
             return False
 
-        # Delete files
-        file_path = settings.base_dir / archive.file_path
-        if file_path.exists():
-            archive_dir = file_path.parent
-            shutil.rmtree(archive_dir, ignore_errors=True)
+        # Delete files - with CRITICAL safety checks to prevent accidental deletion
+        # of parent directories (e.g., /opt) if file_path is empty/malformed
+        if archive.file_path and archive.file_path.strip():
+            file_path = settings.base_dir / archive.file_path
+            if file_path.exists():
+                archive_dir = file_path.parent
+
+                # Safety check 1: archive_dir must be inside archive_dir
+                try:
+                    archive_dir.resolve().relative_to(settings.archive_dir.resolve())
+                except ValueError:
+                    logger.error(
+                        f"SECURITY: Refusing to delete archive {archive_id} - "
+                        f"path {archive_dir} is outside archive directory {settings.archive_dir}"
+                    )
+                    # Still delete the database record, just not the files
+                    await self.db.delete(archive)
+                    await self.db.commit()
+                    return True
+
+                # Safety check 2: archive_dir must be at least 1 level deep inside archive_dir
+                # (should be archive_dir/uuid/file.3mf, so parent should be archive_dir/uuid)
+                try:
+                    relative_path = archive_dir.resolve().relative_to(settings.archive_dir.resolve())
+                    if len(relative_path.parts) < 1:
+                        logger.error(
+                            f"SECURITY: Refusing to delete archive {archive_id} - "
+                            f"path {archive_dir} is not deep enough inside archive directory"
+                        )
+                        await self.db.delete(archive)
+                        await self.db.commit()
+                        return True
+                except ValueError:
+                    pass  # Already handled above
+
+                shutil.rmtree(archive_dir, ignore_errors=True)
+        else:
+            logger.error(
+                f"SECURITY: Refusing to delete files for archive {archive_id} - "
+                f"file_path is empty or invalid: '{archive.file_path}'"
+            )
 
         # Delete database record
         await self.db.delete(archive)

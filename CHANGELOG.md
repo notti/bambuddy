@@ -2,6 +2,116 @@
 
 All notable changes to Bambuddy will be documented in this file.
 
+## [0.1.6b10] - 2026-01-11
+
+### Added
+- **AMS color mapping** - Manually select which AMS slot to use for each filament:
+  - ReprintModal: Click dropdown to override auto-matched slots
+  - AddToQueueModal: Collapsible filament mapping section with slot selection
+  - Mapping stored with queued prints and used when print starts
+  - Blue ring indicator shows manually selected slots vs auto-matched
+  - Status indicators: green (match), yellow (type only), orange (not found)
+  - Re-read button to refresh AMS status if spools were swapped
+  - Color names shown in dropdowns and tooltips (decoded from Bambu filament codes or derived from hex)
+
+## [0.1.6b9] - 2026-01-09
+
+### Added
+- **Chamber light control** - Toggle the printer's chamber LED from the UI:
+  - Light button next to camera button at bottom of printer card
+  - Custom icon with on/off states (yellow when lit)
+  - Works on all Bambu Lab printers (X1, P1, A1 series, H2D)
+  - H2D dual chamber lights controlled together
+- **Archive list view improvements** - Full feature parity with card view:
+  - Edit and delete buttons inline with each row
+  - Three-dot menu button for context menu access
+  - All context menu actions (re-print, compare, add to project, etc.)
+- **Archive object count** - Shows number of printable objects on archive cards:
+  - Displays in stats grid (e.g., "3 objs")
+  - Extracted from 3MF metadata automatically
+- **Cross-view archive highlight** - Click an archive in calendar or project view to highlight it:
+  - Switches to card/list view and scrolls to the archive
+  - Yellow border highlight for 5 seconds
+  - Works in card, list, and calendar views
+- **Context menu visual indicator** - Three-dot button on cards and list items:
+  - Shows on hover (desktop) or always visible (mobile)
+  - Provides quick access to context menu actions
+  - Positioned on left side for easy access
+- **Spoolman location clearing** - When spools are removed from AMS, their location field is now cleared in Spoolman:
+  - Previously, location persisted even after spool removal
+  - Now correctly clears "Printer Name - AMS X Slot Y" when spool is no longer present
+- **FTP retry for unreliable WiFi** - Configurable retry logic for all FTP operations:
+  - Enable/disable retry in Settings > General > FTP Retry
+  - Configure retry count (1-10 attempts) and delay (1-30 seconds)
+  - Configurable connection timeout (10-120 seconds, default 30s)
+  - Applies to: 3MF archiving, print uploads, timelapse downloads, firmware updates
+  - Helps P1S, X1C, and other printers with weak WiFi connections
+- **A1/A1 Mini FTP fix** - Resolved FTP upload failures on A1 series printers:
+  - A1 printers have issues with SSL on the FTP data channel
+  - Automatic detection skips data channel SSL for A1 and A1 Mini models
+  - Control channel remains encrypted via implicit FTPS (port 990)
+  - Fixes "read operation timed out" errors during file uploads
+- **Bulk project assignment** - Assign multiple archives to a project at once:
+  - New "Project" button in multi-select toolbar (next to Tags)
+  - Select a project to assign all selected archives
+  - "Remove from project" option to clear assignments
+  - Updates Projects page and Project Detail page instantly
+
+### Fixed
+- **Time format setting not applied** - Fixed 24-hour time format not being respected across the UI:
+  - ETA display on printer cards now uses configured time format
+  - Archive cards and timelapse file lists respect the setting
+  - AMS history charts use the configured format
+  - Project timeline, queue page, notification logs, and system info all updated
+  - Settings > General > Time Format now works consistently everywhere
+- **QR code endpoint** - Fixed 500 error on archive QR code generation:
+  - Added `qrcode[pil]` to requirements.txt
+  - Improved error handling for missing dependencies
+  - Fixed PIL Image resizing method
+
+## [0.1.6b8] - 2026-01-08
+
+### Added
+- **Reprint modal print options** - Configure print settings when reprinting from archive:
+  - Bed leveling toggle (default: enabled)
+  - Flow calibration toggle (default: disabled)
+  - Vibration calibration toggle (default: enabled)
+  - First layer inspection toggle (default: disabled)
+  - Timelapse recording toggle (default: disabled)
+  - Collapsible "Print Options" section with toggle switches
+  - Settings sent to printer match Bambu Studio's format exactly
+
+### Fixed
+- **AMS mapping for multi-color reprints** - Fixed filament slot mapping for multi-color prints:
+  - AMS mapping now matches Bambu Studio's exact format with `ams_mapping2` detailed structure
+  - Correct handling of 3MF filament slot IDs (1-indexed to 0-indexed conversion)
+  - Unused filament slots properly filled with `-1` placeholder
+  - Prevents duplicate tray assignment when multiple filaments match the same type
+  - Resolves "stuck at filament change" issue on X1C and other multi-AMS printers
+- **Print command format** - Updated MQTT print command to match Bambu Studio exactly:
+  - Added `auto_bed_leveling`, `cfg`, `extrude_cali_flag`, `extrude_cali_manual_mode`, `nozzle_offset_cali` fields
+  - Uses American spelling `bed_leveling` (not British `bed_levelling`)
+  - Proper `sequence_id` format matching official apps
+
+## [0.1.6b7] - 2026-01-04
+
+### Added
+- **Support bundle for issue reporting** - Collect debug logs and system info for troubleshooting:
+  - Toggle debug logging from System Information page
+  - Debug logging indicator banner shows across all pages with live timer
+  - Download support bundle as ZIP file with sanitized logs and system info
+  - Privacy-focused: filters sensitive data (passwords, tokens, emails, IPs)
+  - Clear explanation of what data is/isn't collected
+- **Firmware update helper** - Check and upload firmware updates for LAN-only printers:
+  - Automatic firmware update checking against Bambu Lab's servers
+  - Orange "Update" badge on printer cards when updates are available
+  - Click badge to open firmware update modal with version info and release notes
+  - One-click firmware upload to printer's SD card via FTP
+  - Real-time upload progress tracking with actual bytes transferred
+  - Step-by-step instructions for triggering update from printer screen
+  - Supports all Bambu Lab printer models (X1C, X1, X1E, P1S, P1P, P2S, A1, A1 Mini, H2D, H2C, H2S)
+  - Firmware files cached locally for faster re-uploads
+
 ## [0.1.6b6] - 2026-01-04
 
 ### Added

@@ -43,6 +43,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { openInSlicer } from '../utils/slicer';
+import { formatDateTime, formatDateOnly, parseUTCDate, type TimeFormat } from '../utils/date';
 import { useIsMobile } from '../hooks/useIsMobile';
 import type { Archive, ProjectListItem } from '../api/client';
 import { Card, CardContent } from '../components/Card';
@@ -54,6 +55,7 @@ import { ConfirmModal } from '../components/ConfirmModal';
 import { EditArchiveModal } from '../components/EditArchiveModal';
 import { ContextMenu, type ContextMenuItem } from '../components/ContextMenu';
 import { BatchTagModal } from '../components/BatchTagModal';
+import { BatchProjectModal } from '../components/BatchProjectModal';
 import { CalendarView } from '../components/CalendarView';
 import { QRCodeModal } from '../components/QRCodeModal';
 import { PhotoGalleryModal } from '../components/PhotoGalleryModal';
@@ -77,15 +79,7 @@ function formatDuration(seconds: number): string {
   return `${minutes}m`;
 }
 
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
+// formatDate imported from '../utils/date' - handles UTC conversion
 
 function ArchiveCard({
   archive,
@@ -94,6 +88,8 @@ function ArchiveCard({
   onSelect,
   selectionMode,
   projects,
+  isHighlighted,
+  timeFormat = 'system',
 }: {
   archive: Archive;
   printerName: string;
@@ -101,7 +97,14 @@ function ArchiveCard({
   onSelect: (id: number) => void;
   selectionMode: boolean;
   projects: ProjectListItem[] | undefined;
+  isHighlighted?: boolean;
+  timeFormat?: TimeFormat;
 }) {
+  // Debug: log when card is highlighted
+  if (isHighlighted) {
+    console.log('ArchiveCard isHighlighted=true for archive:', archive.id);
+  }
+
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const isMobile = useIsMobile();
@@ -417,7 +420,9 @@ function ArchiveCard({
 
   return (
     <Card
-      className={`relative flex flex-col ${isSelected ? 'ring-2 ring-bambu-green' : ''} ${selectionMode ? 'cursor-pointer' : ''}`}
+      data-archive-id={archive.id}
+      className={`relative flex flex-col group ${isSelected ? 'ring-2 ring-bambu-green' : ''} ${selectionMode ? 'cursor-pointer' : ''}`}
+      style={isHighlighted ? { outline: '4px solid #facc15', outlineOffset: '2px' } : undefined}
       onContextMenu={handleContextMenu}
       onClick={selectionMode ? () => onSelect(archive.id) : undefined}
     >
@@ -448,20 +453,20 @@ function ArchiveCard({
             <Image className="w-12 h-12 text-bambu-dark-tertiary" />
           </div>
         )}
-        {/* Mobile menu button */}
-        {isMobile && (
-          <button
-            className="absolute top-2 right-10 p-1.5 rounded bg-black/50 hover:bg-black/70 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
-              const rect = e.currentTarget.getBoundingClientRect();
-              setContextMenu({ x: rect.left, y: rect.bottom + 4 });
-            }}
-            title="Menu"
-          >
-            <MoreVertical className="w-5 h-5 text-white" />
-          </button>
-        )}
+        {/* Context menu button - visible on mobile, shows on hover for desktop */}
+        <button
+          className={`absolute top-2 left-2 p-1.5 rounded bg-black/50 hover:bg-black/70 transition-all ${
+            isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+          } ${selectionMode ? 'left-10' : ''}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            const rect = e.currentTarget.getBoundingClientRect();
+            setContextMenu({ x: rect.left, y: rect.bottom + 4 });
+          }}
+          title="Right-click for more options"
+        >
+          <MoreVertical className="w-5 h-5 text-white" />
+        </button>
         {/* Favorite star */}
         <button
           className="absolute top-2 right-2 p-1 rounded bg-black/50 hover:bg-black/70 transition-colors"
@@ -614,6 +619,12 @@ function ArchiveCard({
               {archive.layer_height && <span>{archive.layer_height}mm</span>}
             </div>
           )}
+          {archive.object_count != null && archive.object_count > 0 && (
+            <div className="flex items-center gap-1.5 text-bambu-gray" title={`${archive.object_count} object${archive.object_count > 1 ? 's' : ''}`}>
+              <Box className="w-3 h-3" />
+              {archive.object_count} object{archive.object_count > 1 ? 's' : ''}
+            </div>
+          )}
           {archive.filament_type && (
             <div className="flex items-center gap-1.5 col-span-2">
               <span className="text-bambu-gray text-xs">{archive.filament_type}</span>
@@ -660,7 +671,7 @@ function ArchiveCard({
 
         {/* Date & Size */}
         <div className="flex items-center justify-between text-xs text-bambu-gray border-t border-bambu-dark-tertiary pt-3">
-          <span>{formatDate(archive.created_at)}</span>
+          <span>{formatDateTime(archive.created_at, timeFormat)}</span>
           <span>{formatFileSize(archive.file_size)}</span>
         </div>
 
@@ -676,7 +687,7 @@ function ArchiveCard({
                 onClick={() => setShowReprint(true)}
               >
                 <Printer className="w-3 h-3 flex-shrink-0" />
-                <span className="hidden sm:inline">Print</span>
+                <span className="hidden sm:inline">Reprint</span>
               </Button>
               <Button
                 variant="secondary"
@@ -881,7 +892,7 @@ function ArchiveCard({
                     <p className="text-white font-medium truncate">{file.name}</p>
                     <p className="text-sm text-gray-400">
                       {formatFileSize(file.size)}
-                      {file.mtime && ` • ${formatDate(file.mtime)}`}
+                      {file.mtime && ` • ${formatDateTime(file.mtime, timeFormat)}`}
                     </p>
                   </div>
                 </button>
@@ -966,6 +977,650 @@ function ArchiveCard({
   );
 }
 
+function ArchiveListRow({
+  archive,
+  printerName,
+  isSelected,
+  onSelect,
+  selectionMode,
+  projects,
+  isHighlighted,
+}: {
+  archive: Archive;
+  printerName: string;
+  isSelected: boolean;
+  onSelect: (id: number) => void;
+  selectionMode: boolean;
+  projects: ProjectListItem[] | undefined;
+  isHighlighted?: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+  const [showEdit, setShowEdit] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showReprint, setShowReprint] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [showViewer, setShowViewer] = useState(false);
+  const [showTimelapse, setShowTimelapse] = useState(false);
+  const [showTimelapseSelect, setShowTimelapseSelect] = useState(false);
+  const [availableTimelapses, setAvailableTimelapses] = useState<Array<{ name: string; path: string; size: number; mtime: string | null }>>([]);
+  const [showQRCode, setShowQRCode] = useState(false);
+  const [showPhotos, setShowPhotos] = useState(false);
+  const [showProjectPage, setShowProjectPage] = useState(false);
+  const [showDeleteSource3mfConfirm, setShowDeleteSource3mfConfirm] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const source3mfInputRef = useRef<HTMLInputElement>(null);
+
+  const source3mfUploadMutation = useMutation({
+    mutationFn: (file: File) => api.uploadSource3mf(archive.id, file),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['archives'] });
+      showToast(`Source 3MF attached: ${data.filename}`);
+    },
+    onError: (error: Error) => {
+      showToast(error.message || 'Failed to upload source 3MF', 'error');
+    },
+  });
+
+  const source3mfDeleteMutation = useMutation({
+    mutationFn: () => api.deleteSource3mf(archive.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['archives'] });
+      showToast('Source 3MF removed');
+    },
+    onError: (error: Error) => {
+      showToast(error.message || 'Failed to remove source 3MF', 'error');
+    },
+  });
+
+  const timelapseScanMutation = useMutation({
+    mutationFn: () => api.scanArchiveTimelapse(archive.id),
+    onSuccess: (data) => {
+      if (data.status === 'attached') {
+        queryClient.invalidateQueries({ queryKey: ['archives'] });
+        showToast(`Timelapse attached: ${data.filename}`);
+      } else if (data.status === 'exists') {
+        showToast('Timelapse already attached');
+      } else if (data.status === 'not_found' && data.available_files && data.available_files.length > 0) {
+        setAvailableTimelapses(data.available_files);
+        setShowTimelapseSelect(true);
+      } else {
+        showToast(data.message || 'No matching timelapse found', 'warning');
+      }
+    },
+    onError: (error: Error) => {
+      showToast(error.message || 'Failed to scan for timelapse', 'error');
+    },
+  });
+
+  const timelapseSelectMutation = useMutation({
+    mutationFn: (filename: string) => api.selectArchiveTimelapse(archive.id, filename),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['archives'] });
+      showToast(`Timelapse attached: ${data.filename}`);
+      setShowTimelapseSelect(false);
+      setAvailableTimelapses([]);
+    },
+    onError: (error: Error) => {
+      showToast(error.message || 'Failed to attach timelapse', 'error');
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteArchive(archive.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['archives'] });
+      showToast('Archive deleted');
+    },
+    onError: () => {
+      showToast('Failed to delete archive', 'error');
+    },
+  });
+
+  const favoriteMutation = useMutation({
+    mutationFn: () => api.toggleFavorite(archive.id),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['archives'] });
+      showToast(data.is_favorite ? 'Added to favorites' : 'Removed from favorites');
+    },
+  });
+
+  const assignProjectMutation = useMutation({
+    mutationFn: (projectId: number | null) => api.updateArchive(archive.id, { project_id: projectId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['archives'] });
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      showToast('Project updated');
+    },
+    onError: () => {
+      showToast('Failed to update project', 'error');
+    },
+  });
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  const isGcodeFile = archive.filename?.toLowerCase().includes('.gcode.');
+
+  const contextMenuItems: ContextMenuItem[] = [
+    ...(isGcodeFile ? [
+      {
+        label: 'Print',
+        icon: <Printer className="w-4 h-4" />,
+        onClick: () => setShowReprint(true),
+      },
+      {
+        label: 'Schedule',
+        icon: <Calendar className="w-4 h-4" />,
+        onClick: () => setShowSchedule(true),
+      },
+      {
+        label: 'Open in Bambu Studio',
+        icon: <ExternalLink className="w-4 h-4" />,
+        onClick: () => {
+          const filename = archive.print_name || archive.filename || 'model';
+          const downloadUrl = `${window.location.origin}${api.getArchiveForSlicer(archive.id, filename)}`;
+          openInSlicer(downloadUrl);
+        },
+      },
+    ] : [
+      {
+        label: 'Slice',
+        icon: <ExternalLink className="w-4 h-4" />,
+        onClick: () => {
+          const filename = archive.print_name || archive.filename || 'model';
+          const downloadUrl = `${window.location.origin}${api.getArchiveForSlicer(archive.id, filename)}`;
+          openInSlicer(downloadUrl);
+        },
+      },
+    ]),
+    {
+      label: 'View on MakerWorld',
+      icon: <Globe className="w-4 h-4" />,
+      onClick: () => archive.makerworld_url && window.open(archive.makerworld_url, '_blank'),
+      disabled: !archive.makerworld_url,
+    },
+    { label: '', divider: true, onClick: () => {} },
+    {
+      label: '3D Preview',
+      icon: <Box className="w-4 h-4" />,
+      onClick: () => setShowViewer(true),
+    },
+    {
+      label: 'View Timelapse',
+      icon: <Film className="w-4 h-4" />,
+      onClick: () => setShowTimelapse(true),
+      disabled: !archive.timelapse_path,
+    },
+    {
+      label: 'Scan for Timelapse',
+      icon: <ScanSearch className="w-4 h-4" />,
+      onClick: () => timelapseScanMutation.mutate(),
+      disabled: !archive.printer_id || !!archive.timelapse_path || timelapseScanMutation.isPending,
+    },
+    { label: '', divider: true, onClick: () => {} },
+    {
+      label: archive.source_3mf_path ? 'Download Source 3MF' : 'Upload Source 3MF',
+      icon: <FileCode className="w-4 h-4" />,
+      onClick: () => {
+        if (archive.source_3mf_path) {
+          const link = document.createElement('a');
+          link.href = api.getSource3mfDownloadUrl(archive.id);
+          link.download = `${archive.print_name || archive.filename}_source.3mf`;
+          link.click();
+        } else {
+          source3mfInputRef.current?.click();
+        }
+      },
+    },
+    ...(archive.source_3mf_path ? [{
+      label: 'Replace Source 3MF',
+      icon: <Upload className="w-4 h-4" />,
+      onClick: () => source3mfInputRef.current?.click(),
+    },
+    {
+      label: 'Remove Source 3MF',
+      icon: <Trash2 className="w-4 h-4" />,
+      onClick: () => setShowDeleteSource3mfConfirm(true),
+      danger: true,
+    }] : []),
+    { label: '', divider: true, onClick: () => {} },
+    {
+      label: 'Download',
+      icon: <Download className="w-4 h-4" />,
+      onClick: () => {
+        const link = document.createElement('a');
+        link.href = api.getArchiveDownload(archive.id);
+        link.download = `${archive.print_name || archive.filename}.3mf`;
+        link.click();
+      },
+    },
+    {
+      label: 'Copy Download Link',
+      icon: <Copy className="w-4 h-4" />,
+      onClick: () => {
+        const url = `${window.location.origin}${api.getArchiveDownload(archive.id)}`;
+        navigator.clipboard.writeText(url).then(() => {
+          showToast('Link copied to clipboard');
+        }).catch(() => {
+          showToast('Failed to copy link', 'error');
+        });
+      },
+    },
+    {
+      label: 'QR Code',
+      icon: <QrCode className="w-4 h-4" />,
+      onClick: () => setShowQRCode(true),
+    },
+    {
+      label: `View Photos${archive.photos?.length ? ` (${archive.photos.length})` : ''}`,
+      icon: <Camera className="w-4 h-4" />,
+      onClick: () => setShowPhotos(true),
+      disabled: !archive.photos?.length,
+    },
+    {
+      label: 'Project Page',
+      icon: <FileText className="w-4 h-4" />,
+      onClick: () => setShowProjectPage(true),
+    },
+    { label: '', divider: true, onClick: () => {} },
+    {
+      label: archive.is_favorite ? 'Remove from Favorites' : 'Add to Favorites',
+      icon: <Star className={`w-4 h-4 ${archive.is_favorite ? 'fill-yellow-400 text-yellow-400' : ''}`} />,
+      onClick: () => favoriteMutation.mutate(),
+    },
+    {
+      label: 'Edit',
+      icon: <Pencil className="w-4 h-4" />,
+      onClick: () => setShowEdit(true),
+    },
+    ...(archive.project_id && archive.project_name ? [{
+      label: `Go to Project: ${archive.project_name}`,
+      icon: <FolderKanban className="w-4 h-4 text-bambu-green" />,
+      onClick: () => window.location.href = '/projects',
+    }] : []),
+    {
+      label: 'Add to Project',
+      icon: <FolderKanban className="w-4 h-4" />,
+      onClick: () => {},
+      submenu: (() => {
+        const items: ContextMenuItem[] = [];
+        if (archive.project_id) {
+          items.push({
+            label: 'Remove from Project',
+            icon: <X className="w-4 h-4" />,
+            onClick: () => assignProjectMutation.mutate(null),
+          });
+        }
+        if (!projects) {
+          items.push({
+            label: 'Loading...',
+            icon: <Loader2 className="w-4 h-4 animate-spin" />,
+            onClick: () => {},
+            disabled: true,
+          });
+        } else {
+          const activeProjects = projects.filter(p => p.status === 'active');
+          if (activeProjects.length === 0) {
+            items.push({
+              label: 'No projects available',
+              icon: <FolderKanban className="w-4 h-4 opacity-50" />,
+              onClick: () => {},
+              disabled: true,
+            });
+          } else {
+            activeProjects.forEach(p => {
+              items.push({
+                label: p.name,
+                icon: <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: p.color || '#888' }} />,
+                onClick: () => assignProjectMutation.mutate(p.id),
+                disabled: archive.project_id === p.id,
+              });
+            });
+          }
+        }
+        return items;
+      })(),
+    },
+    {
+      label: isSelected ? 'Deselect' : 'Select',
+      icon: isSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />,
+      onClick: () => onSelect(archive.id),
+    },
+    { label: '', divider: true, onClick: () => {} },
+    {
+      label: 'Delete',
+      icon: <Trash2 className="w-4 h-4" />,
+      onClick: () => setShowDeleteConfirm(true),
+      danger: true,
+    },
+  ];
+
+  return (
+    <>
+      <div
+        data-archive-id={archive.id}
+        className={`grid grid-cols-12 gap-4 px-4 py-3 items-center hover:bg-bambu-dark-tertiary/30 ${
+          isSelected ? 'bg-bambu-green/10' : ''
+        }`}
+        style={isHighlighted ? { outline: '4px solid #facc15', outlineOffset: '-4px' } : undefined}
+        onContextMenu={handleContextMenu}
+      >
+        <div className="col-span-1 flex items-center gap-2">
+          {selectionMode && (
+            <button onClick={() => onSelect(archive.id)}>
+              {isSelected ? (
+                <CheckSquare className="w-4 h-4 text-bambu-green" />
+              ) : (
+                <Square className="w-4 h-4 text-bambu-gray" />
+              )}
+            </button>
+          )}
+          {archive.thumbnail_path ? (
+            <img
+              src={api.getArchiveThumbnail(archive.id)}
+              alt=""
+              className="w-10 h-10 object-cover rounded"
+            />
+          ) : (
+            <div className="w-10 h-10 bg-bambu-dark rounded flex items-center justify-center">
+              <Image className="w-5 h-5 text-bambu-dark-tertiary" />
+            </div>
+          )}
+        </div>
+        <div className="col-span-4">
+          <div className="flex items-center gap-2">
+            <p className="text-white text-sm truncate">{archive.print_name || archive.filename}</p>
+            {archive.timelapse_path && (
+              <span title="Has timelapse">
+                <Film className="w-3.5 h-3.5 text-bambu-green flex-shrink-0" />
+              </span>
+            )}
+          </div>
+          {archive.filament_type && (
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="text-xs text-bambu-gray">{archive.filament_type}</span>
+              {archive.filament_color && (
+                <div className="flex items-center gap-0.5 flex-wrap">
+                  {archive.filament_color.split(',').map((color, i) => (
+                    <div
+                      key={i}
+                      className="w-2.5 h-2.5 rounded-full border border-white/20"
+                      style={{ backgroundColor: color }}
+                      title={color}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="col-span-2 text-sm text-bambu-gray truncate">
+          {printerName}
+        </div>
+        <div className="col-span-2 text-sm text-bambu-gray">
+          {formatDateOnly(archive.created_at)}
+        </div>
+        <div className="col-span-1 text-sm text-bambu-gray">
+          {formatFileSize(archive.file_size)}
+        </div>
+        <div className="col-span-2 flex justify-end gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              const filename = archive.print_name || archive.filename || 'model';
+              const downloadUrl = `${window.location.origin}${api.getArchiveForSlicer(archive.id, filename)}`;
+              openInSlicer(downloadUrl);
+            }}
+            title="Open in Bambu Studio"
+          >
+            <ExternalLink className="w-4 h-4" />
+          </Button>
+          {archive.makerworld_url && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => window.open(archive.makerworld_url!, '_blank')}
+              title="MakerWorld"
+            >
+              <Globe className="w-4 h-4" />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              const link = document.createElement('a');
+              link.href = api.getArchiveDownload(archive.id);
+              link.download = `${archive.print_name || archive.filename}.3mf`;
+              link.click();
+            }}
+            title="Download"
+          >
+            <Download className="w-4 h-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowEdit(true)}
+            title="Edit"
+          >
+            <Pencil className="w-4 h-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowDeleteConfirm(true)}
+            title="Delete"
+          >
+            <Trash2 className="w-4 h-4 text-red-400" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setContextMenu({ x: rect.left, y: rect.bottom + 4 });
+            }}
+            title="More options"
+          >
+            <MoreVertical className="w-4 h-4" />
+          </Button>
+        </div>
+      </div>
+
+      {/* Edit Modal */}
+      {showEdit && (
+        <EditArchiveModal
+          archive={archive}
+          onClose={() => setShowEdit(false)}
+        />
+      )}
+
+      {/* 3D Viewer Modal */}
+      {showViewer && (
+        <ModelViewerModal
+          archiveId={archive.id}
+          title={archive.print_name || archive.filename}
+          onClose={() => setShowViewer(false)}
+        />
+      )}
+
+      {/* Reprint Modal */}
+      {showReprint && (
+        <ReprintModal
+          archiveId={archive.id}
+          archiveName={archive.print_name || archive.filename}
+          onClose={() => setShowReprint(false)}
+          onSuccess={() => {}}
+        />
+      )}
+
+      {/* Delete Confirmation */}
+      {showDeleteConfirm && (
+        <ConfirmModal
+          title="Delete Archive"
+          message={`Are you sure you want to delete "${archive.print_name || archive.filename}"? This action cannot be undone.`}
+          confirmText="Delete"
+          variant="danger"
+          onConfirm={() => {
+            deleteMutation.mutate();
+            setShowDeleteConfirm(false);
+          }}
+          onCancel={() => setShowDeleteConfirm(false)}
+        />
+      )}
+
+      {/* Delete Source 3MF Confirmation */}
+      {showDeleteSource3mfConfirm && (
+        <ConfirmModal
+          title="Remove Source 3MF"
+          message={`Are you sure you want to remove the source 3MF file from "${archive.print_name || archive.filename}"?`}
+          confirmText="Remove"
+          variant="danger"
+          onConfirm={() => {
+            source3mfDeleteMutation.mutate();
+            setShowDeleteSource3mfConfirm(false);
+          }}
+          onCancel={() => setShowDeleteSource3mfConfirm(false)}
+        />
+      )}
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenuItems}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* Timelapse Viewer Modal */}
+      {showTimelapse && archive.timelapse_path && (
+        <TimelapseViewer
+          src={api.getArchiveTimelapse(archive.id)}
+          title={`${archive.print_name || archive.filename} - Timelapse`}
+          downloadFilename={`${archive.print_name || archive.filename}_timelapse.mp4`}
+          archiveId={archive.id}
+          onClose={() => setShowTimelapse(false)}
+          onEdit={() => {
+            queryClient.invalidateQueries({ queryKey: ['archives'] });
+            setShowTimelapse(false);
+          }}
+        />
+      )}
+
+      {/* Timelapse Selection Modal */}
+      {showTimelapseSelect && availableTimelapses.length > 0 && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-card-dark rounded-lg max-w-lg w-full max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between p-4 border-b border-gray-700">
+              <div>
+                <h3 className="text-lg font-semibold text-white">Select Timelapse</h3>
+                <p className="text-sm text-gray-400 mt-1">
+                  No auto-match found. Select the timelapse for this print:
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowTimelapseSelect(false);
+                  setAvailableTimelapses([]);
+                }}
+                className="text-gray-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-2">
+              {availableTimelapses.map((file) => (
+                <button
+                  key={file.name}
+                  onClick={() => timelapseSelectMutation.mutate(file.name)}
+                  disabled={timelapseSelectMutation.isPending}
+                  className="w-full text-left p-3 rounded-lg hover:bg-gray-700 transition-colors mb-1"
+                >
+                  <div className="font-medium text-white">{file.name}</div>
+                  <div className="text-sm text-gray-400 flex gap-3">
+                    <span>{formatFileSize(file.size)}</span>
+                    {file.mtime && (
+                      <span>{formatDateOnly(file.mtime)}</span>
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QR Code Modal */}
+      {showQRCode && (
+        <QRCodeModal
+          archiveId={archive.id}
+          archiveName={archive.print_name || archive.filename}
+          onClose={() => setShowQRCode(false)}
+        />
+      )}
+
+      {/* Photo Gallery Modal */}
+      {showPhotos && archive.photos && (
+        <PhotoGalleryModal
+          archiveId={archive.id}
+          archiveName={archive.print_name || archive.filename}
+          photos={archive.photos}
+          onClose={() => setShowPhotos(false)}
+          onDelete={async (filename) => {
+            try {
+              await api.deleteArchivePhoto(archive.id, filename);
+              queryClient.invalidateQueries({ queryKey: ['archives'] });
+              showToast('Photo deleted');
+            } catch {
+              showToast('Failed to delete photo', 'error');
+            }
+          }}
+        />
+      )}
+
+      {/* Project Page Modal */}
+      {showProjectPage && (
+        <ProjectPageModal
+          archiveId={archive.id}
+          archiveName={archive.print_name || archive.filename}
+          onClose={() => setShowProjectPage(false)}
+        />
+      )}
+
+      {/* Schedule Modal */}
+      {showSchedule && (
+        <AddToQueueModal
+          archiveId={archive.id}
+          archiveName={archive.print_name || archive.filename}
+          onClose={() => setShowSchedule(false)}
+        />
+      )}
+
+      {/* Hidden file input for source 3MF upload */}
+      <input
+        ref={source3mfInputRef}
+        type="file"
+        accept=".3mf"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) {
+            source3mfUploadMutation.mutate(file);
+          }
+          e.target.value = '';
+        }}
+      />
+    </>
+  );
+}
+
 type SortOption = 'date-desc' | 'date-asc' | 'name-asc' | 'name-desc' | 'size-desc' | 'size-asc';
 type ViewMode = 'grid' | 'list' | 'calendar';
 type Collection = 'all' | 'recent' | 'this-week' | 'this-month' | 'favorites' | 'failed' | 'duplicates';
@@ -1018,6 +1673,7 @@ export function ArchivesPage() {
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
   const [showBatchTag, setShowBatchTag] = useState(false);
+  const [showBatchProject, setShowBatchProject] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(() =>
     (localStorage.getItem('archiveViewMode') as ViewMode) || 'grid'
   );
@@ -1030,6 +1686,27 @@ export function ArchivesPage() {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [showCompareModal, setShowCompareModal] = useState(false);
+  const [highlightedArchiveId, setHighlightedArchiveId] = useState<number | null>(null);
+
+  // Clear highlight after 5 seconds and scroll to highlighted element
+  useEffect(() => {
+    if (highlightedArchiveId) {
+      // Scroll to highlighted element after a short delay (to let the view render)
+      const scrollTimer = setTimeout(() => {
+        const element = document.querySelector(`[data-archive-id="${highlightedArchiveId}"]`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 100);
+
+      // Clear highlight after 5 seconds
+      const clearTimer = setTimeout(() => setHighlightedArchiveId(null), 5000);
+      return () => {
+        clearTimeout(scrollTimer);
+        clearTimeout(clearTimer);
+      };
+    }
+  }, [highlightedArchiveId]);
 
   const { data: archives, isLoading } = useQuery({
     queryKey: ['archives', filterPrinter],
@@ -1045,6 +1722,13 @@ export function ArchivesPage() {
     queryKey: ['projects'],
     queryFn: () => api.getProjects(),
   });
+
+  const { data: settings } = useQuery({
+    queryKey: ['settings'],
+    queryFn: api.getSettings,
+  });
+
+  const timeFormat: TimeFormat = settings?.time_format || 'system';
 
   const bulkDeleteMutation = useMutation({
     mutationFn: async (ids: number[]) => {
@@ -1137,7 +1821,7 @@ export function ArchivesPage() {
     ?.filter((a) => {
       // Collection filter
       const now = new Date();
-      const archiveDate = new Date(a.created_at);
+      const archiveDate = parseUTCDate(a.created_at) || new Date(0);
       let matchesCollection = true;
 
       switch (collection) {
@@ -1196,9 +1880,9 @@ export function ArchivesPage() {
     .sort((a, b) => {
       switch (sortBy) {
         case 'date-desc':
-          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+          return (parseUTCDate(b.created_at)?.getTime() || 0) - (parseUTCDate(a.created_at)?.getTime() || 0);
         case 'date-asc':
-          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+          return (parseUTCDate(a.created_at)?.getTime() || 0) - (parseUTCDate(b.created_at)?.getTime() || 0);
         case 'name-asc':
           return (a.print_name || a.filename).localeCompare(b.print_name || b.filename);
         case 'name-desc':
@@ -1371,6 +2055,14 @@ export function ArchivesPage() {
           >
             <Tag className="w-4 h-4" />
             Tags
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setShowBatchProject(true)}
+          >
+            <FolderKanban className="w-4 h-4" />
+            Project
           </Button>
           <Button
             variant="secondary"
@@ -1746,10 +2438,12 @@ export function ArchivesPage() {
           <CalendarView
             archives={filteredArchives || []}
             onArchiveClick={(archive) => {
-              // Switch to grid view and search for the archive
-              setSearch(archive.print_name || archive.filename);
+              // Switch to grid view and highlight the archive
+              setSearch(''); // Clear search to show all archives
               setViewMode('grid');
+              setHighlightedArchiveId(archive.id);
             }}
+            highlightedArchiveId={highlightedArchiveId}
           />
         </Card>
       ) : viewMode === 'grid' ? (
@@ -1763,6 +2457,8 @@ export function ArchivesPage() {
               onSelect={toggleSelect}
               selectionMode={selectionMode}
               projects={projects}
+              isHighlighted={archive.id === highlightedArchiveId}
+              timeFormat={timeFormat}
             />
           ))}
         </div>
@@ -1780,108 +2476,16 @@ export function ArchivesPage() {
             </div>
             {/* List Items */}
             {filteredArchives?.map((archive) => (
-              <div
+              <ArchiveListRow
                 key={archive.id}
-                className={`grid grid-cols-12 gap-4 px-4 py-3 items-center hover:bg-bambu-dark-tertiary/30 ${
-                  selectedIds.has(archive.id) ? 'bg-bambu-green/10' : ''
-                }`}
-              >
-                <div className="col-span-1 flex items-center gap-2">
-                  {selectionMode && (
-                    <button onClick={() => toggleSelect(archive.id)}>
-                      {selectedIds.has(archive.id) ? (
-                        <CheckSquare className="w-4 h-4 text-bambu-green" />
-                      ) : (
-                        <Square className="w-4 h-4 text-bambu-gray" />
-                      )}
-                    </button>
-                  )}
-                  {archive.thumbnail_path ? (
-                    <img
-                      src={api.getArchiveThumbnail(archive.id)}
-                      alt=""
-                      className="w-10 h-10 object-cover rounded"
-                    />
-                  ) : (
-                    <div className="w-10 h-10 bg-bambu-dark rounded flex items-center justify-center">
-                      <Image className="w-5 h-5 text-bambu-dark-tertiary" />
-                    </div>
-                  )}
-                </div>
-                <div className="col-span-4">
-                  <div className="flex items-center gap-2">
-                    <p className="text-white text-sm truncate">{archive.print_name || archive.filename}</p>
-                    {archive.timelapse_path && (
-                      <span title="Has timelapse">
-                        <Film className="w-3.5 h-3.5 text-bambu-green flex-shrink-0" />
-                      </span>
-                    )}
-                  </div>
-                  {archive.filament_type && (
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <span className="text-xs text-bambu-gray">{archive.filament_type}</span>
-                      {archive.filament_color && (
-                        <div className="flex items-center gap-0.5 flex-wrap">
-                          {archive.filament_color.split(',').map((color, i) => (
-                            <div
-                              key={i}
-                              className="w-2.5 h-2.5 rounded-full border border-white/20"
-                              style={{ backgroundColor: color }}
-                              title={color}
-                            />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div className="col-span-2 text-sm text-bambu-gray truncate">
-                  {archive.printer_id ? printerMap.get(archive.printer_id) || 'Unknown' : 'No Printer'}
-                </div>
-                <div className="col-span-2 text-sm text-bambu-gray">
-                  {new Date(archive.created_at).toLocaleDateString()}
-                </div>
-                <div className="col-span-1 text-sm text-bambu-gray">
-                  {formatFileSize(archive.file_size)}
-                </div>
-                <div className="col-span-2 flex justify-end gap-1">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      const filename = archive.print_name || archive.filename || 'model';
-                      const downloadUrl = `${window.location.origin}${api.getArchiveForSlicer(archive.id, filename)}`;
-                      openInSlicer(downloadUrl);
-                    }}
-                    title="Slice"
-                  >
-                    <ExternalLink className="w-4 h-4" />
-                  </Button>
-                  {archive.makerworld_url && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => window.open(archive.makerworld_url!, '_blank')}
-                      title="MakerWorld"
-                    >
-                      <Globe className="w-4 h-4" />
-                    </Button>
-                  )}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      const link = document.createElement('a');
-                      link.href = api.getArchiveDownload(archive.id);
-                      link.download = `${archive.print_name || archive.filename}.3mf`;
-                      link.click();
-                    }}
-                    title="Download"
-                  >
-                    <Download className="w-4 h-4" />
-                  </Button>
-                </div>
-              </div>
+                archive={archive}
+                printerName={archive.printer_id ? printerMap.get(archive.printer_id) || 'Unknown' : 'No Printer'}
+                isSelected={selectedIds.has(archive.id)}
+                onSelect={toggleSelect}
+                selectionMode={selectionMode}
+                projects={projects}
+                isHighlighted={archive.id === highlightedArchiveId}
+              />
             ))}
           </div>
         </Card>
@@ -1919,6 +2523,14 @@ export function ArchivesPage() {
           selectedIds={Array.from(selectedIds)}
           existingTags={uniqueTags}
           onClose={() => setShowBatchTag(false)}
+        />
+      )}
+
+      {/* Batch Project Modal */}
+      {showBatchProject && (
+        <BatchProjectModal
+          selectedIds={Array.from(selectedIds)}
+          onClose={() => setShowBatchProject(false)}
         />
       )}
 

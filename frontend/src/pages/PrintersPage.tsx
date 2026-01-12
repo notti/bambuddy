@@ -23,8 +23,6 @@ import {
   Pencil,
   ArrowUp,
   ArrowDown,
-  LayoutGrid,
-  LayoutList,
   Layers,
   Video,
   Search,
@@ -37,7 +35,7 @@ import {
   Fan,
   Wind,
   AirVent,
-  Minus,
+  Download,
 } from 'lucide-react';
 
 // Custom Skip Objects icon - arrow jumping over boxes
@@ -53,8 +51,9 @@ const SkipObjectsIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 import { useNavigate } from 'react-router-dom';
-import { api, discoveryApi } from '../api/client';
-import type { Printer, PrinterCreate, AMSUnit, DiscoveredPrinter } from '../api/client';
+import { api, discoveryApi, firmwareApi } from '../api/client';
+import { formatDateOnly } from '../utils/date';
+import type { Printer, PrinterCreate, AMSUnit, DiscoveredPrinter, FirmwareUpdateInfo, FirmwareUploadStatus } from '../api/client';
 import { Card, CardContent } from '../components/Card';
 import { Button } from '../components/Button';
 import { ConfirmModal } from '../components/ConfirmModal';
@@ -66,6 +65,7 @@ import { AMSHistoryModal } from '../components/AMSHistoryModal';
 import { FilamentHoverCard, EmptySlotHoverCard } from '../components/FilamentHoverCard';
 import { LinkSpoolModal } from '../components/LinkSpoolModal';
 import { useToast } from '../contexts/ToastContext';
+import { ChamberLight } from '../components/icons/ChamberLight';
 
 // Complete Bambu Lab filament color mapping by tray_id_name
 // Source: https://github.com/queengooborg/Bambu-Lab-RFID-Library
@@ -644,7 +644,7 @@ function formatTime(seconds: number): string {
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
-function formatETA(remainingMinutes: number): string {
+function formatETA(remainingMinutes: number, timeFormat: 'system' | '12h' | '24h' = 'system'): string {
   const now = new Date();
   const eta = new Date(now.getTime() + remainingMinutes * 60 * 1000);
   const today = new Date();
@@ -652,7 +652,16 @@ function formatETA(remainingMinutes: number): string {
   const etaDay = new Date(eta);
   etaDay.setHours(0, 0, 0, 0);
 
-  const timeStr = eta.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Build time format options based on setting
+  const timeOptions: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit' };
+  if (timeFormat === '12h') {
+    timeOptions.hour12 = true;
+  } else if (timeFormat === '24h') {
+    timeOptions.hour12 = false;
+  }
+  // 'system' leaves hour12 undefined, letting the browser decide
+
+  const timeStr = eta.toLocaleTimeString([], timeOptions);
 
   // Check if it's tomorrow or later
   const dayDiff = Math.floor((etaDay.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
@@ -861,14 +870,17 @@ function PrinterCard({
   hideIfDisconnected,
   maintenanceInfo,
   viewMode = 'expanded',
+  cardSize = 2,
   amsThresholds,
   spoolmanEnabled = false,
   hasUnlinkedSpools = false,
+  timeFormat = 'system',
 }: {
   printer: Printer;
   hideIfDisconnected?: boolean;
   maintenanceInfo?: PrinterMaintenanceInfo;
   viewMode?: ViewMode;
+  cardSize?: number;
   amsThresholds?: {
     humidityGood: number;
     humidityFair: number;
@@ -877,6 +889,7 @@ function PrinterCard({
   };
   spoolmanEnabled?: boolean;
   hasUnlinkedSpools?: boolean;
+  timeFormat?: 'system' | '12h' | '24h';
 }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -903,11 +916,20 @@ function PrinterCard({
     trayUuid: string;
     trayInfo: { type: string; color: string; location: string };
   } | null>(null);
+  const [showFirmwareModal, setShowFirmwareModal] = useState(false);
 
   const { data: status } = useQuery({
     queryKey: ['printerStatus', printer.id],
     queryFn: () => api.getPrinterStatus(printer.id),
     refetchInterval: 30000, // Fallback polling, WebSocket handles real-time
+  });
+
+  // Check for firmware updates (cached for 5 minutes)
+  const { data: firmwareInfo } = useQuery({
+    queryKey: ['firmwareUpdate', printer.id],
+    queryFn: () => firmwareApi.checkPrinterUpdate(printer.id),
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: 5 * 60 * 1000,
   });
 
   // Collect unique tray_info_idx values for cloud filament info lookup
@@ -1025,6 +1047,7 @@ function PrinterCard({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['printers'] });
       queryClient.invalidateQueries({ queryKey: ['archives'] });
+      queryClient.invalidateQueries({ queryKey: ['maintenanceOverview'] });
     },
   });
 
@@ -1080,6 +1103,33 @@ function PrinterCard({
       queryClient.invalidateQueries({ queryKey: ['printerStatus', printer.id] });
     },
     onError: (error: Error) => showToast(error.message || 'Failed to resume print', 'error'),
+  });
+
+  // Chamber light mutation with optimistic update
+  const chamberLightMutation = useMutation({
+    mutationFn: (on: boolean) => api.setChamberLight(printer.id, on),
+    onMutate: async (on) => {
+      // Cancel any outgoing refetches
+      await queryClient.cancelQueries({ queryKey: ['printerStatus', printer.id] });
+      // Snapshot the previous value
+      const previousStatus = queryClient.getQueryData(['printerStatus', printer.id]);
+      // Optimistically update
+      queryClient.setQueryData(['printerStatus', printer.id], (old: typeof status) => ({
+        ...old,
+        chamber_light: on,
+      }));
+      return { previousStatus };
+    },
+    onSuccess: (_, on) => {
+      showToast(`Chamber light ${on ? 'on' : 'off'}`);
+    },
+    onError: (error: Error, _, context) => {
+      // Rollback on error
+      if (context?.previousStatus) {
+        queryClient.setQueryData(['printerStatus', printer.id], context.previousStatus);
+      }
+      showToast(error.message || 'Failed to control chamber light', 'error');
+    },
   });
 
   // Query for printable objects (for skip functionality)
@@ -1199,11 +1249,40 @@ function PrinterCard({
     return null;
   }
 
+  // Size-based styling helpers
+  const getImageSize = () => {
+    switch (cardSize) {
+      case 1: return 'w-10 h-10';
+      case 2: return 'w-14 h-14';
+      case 3: return 'w-16 h-16';
+      case 4: return 'w-20 h-20';
+      default: return 'w-14 h-14';
+    }
+  };
+  const getTitleSize = () => {
+    switch (cardSize) {
+      case 1: return 'text-base truncate';
+      case 2: return 'text-lg';
+      case 3: return 'text-xl';
+      case 4: return 'text-2xl';
+      default: return 'text-lg';
+    }
+  };
+  const getSpacing = () => {
+    switch (cardSize) {
+      case 1: return 'mb-2';
+      case 2: return 'mb-4';
+      case 3: return 'mb-5';
+      case 4: return 'mb-6';
+      default: return 'mb-4';
+    }
+  };
+
   return (
     <Card className="relative">
-      <CardContent>
+      <CardContent className={cardSize >= 3 ? 'p-5' : ''}>
         {/* Header */}
-        <div className={viewMode === 'compact' ? 'mb-2' : 'mb-4'}>
+        <div className={getSpacing()}>
           {/* Top row: Image, Name, Menu */}
           <div className="flex items-start justify-between gap-2">
             <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -1211,11 +1290,11 @@ function PrinterCard({
               <img
                 src={getPrinterImage(printer.model)}
                 alt={printer.model || 'Printer'}
-                className={`object-contain rounded-lg bg-bambu-dark flex-shrink-0 ${viewMode === 'compact' ? 'w-10 h-10' : 'w-14 h-14'}`}
+                className={`object-contain rounded-lg bg-bambu-dark flex-shrink-0 ${getImageSize()}`}
               />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <h3 className={`font-semibold text-white ${viewMode === 'compact' ? 'text-base truncate' : 'text-lg'}`}>{printer.name}</h3>
+                  <h3 className={`font-semibold text-white ${getTitleSize()}`}>{printer.name}</h3>
                   {/* Connection indicator dot for compact mode */}
                   {viewMode === 'compact' && (
                     <div
@@ -1391,6 +1470,17 @@ function PrinterCard({
                   {queueCount}
                 </button>
               )}
+              {/* Firmware Update Badge */}
+              {firmwareInfo?.update_available && (
+                <button
+                  onClick={() => setShowFirmwareModal(true)}
+                  className="flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-orange-500/20 text-orange-400 hover:opacity-80 transition-opacity"
+                  title={`Firmware update available: ${firmwareInfo.current_version} → ${firmwareInfo.latest_version}`}
+                >
+                  <Download className="w-3 h-3" />
+                  Update
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1538,7 +1628,7 @@ function PrinterCard({
                                   {formatTime(status.remaining_time * 60)}
                                 </span>
                                 <span className="text-bambu-green font-medium" title="Estimated completion time">
-                                  ETA {formatETA(status.remaining_time)}
+                                  ETA {formatETA(status.remaining_time, timeFormat)}
                                 </span>
                               </>
                             )}
@@ -1567,7 +1657,7 @@ function PrinterCard({
                               Last: {lastPrint.print_name || lastPrint.filename}
                               {lastPrint.completed_at && (
                                 <span className="ml-1 text-bambu-gray/60">
-                                  • {new Date(lastPrint.completed_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                                  • {formatDateOnly(lastPrint.completed_at, { month: 'short', day: 'numeric' })}
                                 </span>
                               )}
                             </p>
@@ -2309,6 +2399,18 @@ function PrinterCard({
               <p className="truncate">{printer.serial_number}</p>
             </div>
             <div className="flex items-center gap-2">
+              {/* Chamber Light Toggle */}
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => chamberLightMutation.mutate(!status?.chamber_light)}
+                disabled={!status?.connected || chamberLightMutation.isPending}
+                title={status?.chamber_light ? 'Turn off chamber light' : 'Turn on chamber light'}
+                className={status?.chamber_light ? 'bg-yellow-500/20 hover:bg-yellow-500/30 border-yellow-500/30' : ''}
+              >
+                <ChamberLight on={status?.chamber_light ?? false} className="w-4 h-4" />
+              </Button>
+              {/* Camera Button */}
               <Button
                 variant="secondary"
                 size="sm"
@@ -2321,7 +2423,7 @@ function PrinterCard({
                     `height=${state.height}`,
                     state.left !== undefined ? `left=${state.left}` : '',
                     state.top !== undefined ? `top=${state.top}` : '',
-                    'menubar=no,toolbar=no,location=no,status=no',
+                    'menubar=no,toolbar=no,location=no,status=no,noopener',
                   ].filter(Boolean).join(',');
                   window.open(`/camera/${printer.id}`, `camera-${printer.id}`, features);
                 }}
@@ -2530,30 +2632,31 @@ function PrinterCard({
 
                           // Use position data if available, otherwise fall back to grid
                           if (obj.x != null && obj.y != null && objectsData.bbox_all) {
-                            // bbox_all is [x_min, y_min, x_max, y_max] - the bounds of all objects
-                            // The top_N.png image is rendered to show this area with ~10% padding
+                            // bbox_all defines the visible area in the top_N.png image
+                            // Format: [x_min, y_min, x_max, y_max] in mm
                             const [xMin, yMin, xMax, yMax] = objectsData.bbox_all;
                             const bboxWidth = xMax - xMin;
                             const bboxHeight = yMax - yMin;
 
-                            // Calculate position relative to bbox, with padding
-                            // The image has roughly 10% padding on each side
-                            const padding = 10;
+                            // The image shows bbox_all area with some padding (~5-10%)
+                            const padding = 8;
                             const contentArea = 100 - (padding * 2);
 
+                            // Map object position to image percentage
                             x = padding + ((obj.x - xMin) / bboxWidth) * contentArea;
-                            // Y axis: in 3D coords Y increases toward back, in image Y increases down
-                            // So we need to flip: high Y in 3D = low Y in image (top)
+                            // Y axis: image Y increases downward, but 3D Y increases toward back
                             y = padding + ((yMax - obj.y) / bboxHeight) * contentArea;
 
                             // Clamp to valid range
                             x = Math.max(5, Math.min(95, x));
                             y = Math.max(5, Math.min(95, y));
                           } else if (obj.x != null && obj.y != null) {
-                            // Fallback: use full build plate (256mm for X1C)
-                            const buildPlateSize = 256;
-                            x = Math.max(10, Math.min(90, (obj.x / buildPlateSize) * 100));
-                            y = Math.max(10, Math.min(90, 100 - (obj.y / buildPlateSize) * 100));
+                            // Fallback: use full build plate (256mm)
+                            const buildPlate = 256;
+                            x = (obj.x / buildPlate) * 100;
+                            y = 100 - (obj.y / buildPlate) * 100;
+                            x = Math.max(5, Math.min(95, x));
+                            y = Math.max(5, Math.min(95, y));
                           } else {
                             // Fallback: arrange in a grid pattern over the build plate area
                             const cols = Math.ceil(Math.sqrt(objectsData.objects.length));
@@ -2694,6 +2797,15 @@ function PrinterCard({
         <EditPrinterModal
           printer={printer}
           onClose={() => setShowEditModal(false)}
+        />
+      )}
+
+      {/* Firmware Update Modal */}
+      {showFirmwareModal && firmwareInfo && (
+        <FirmwareUpdateModal
+          printer={printer}
+          firmwareInfo={firmwareInfo}
+          onClose={() => setShowFirmwareModal(false)}
         />
       )}
 
@@ -3087,6 +3199,206 @@ function AddPrinterModal({
   );
 }
 
+function FirmwareUpdateModal({
+  printer,
+  firmwareInfo,
+  onClose,
+}: {
+  printer: Printer;
+  firmwareInfo: FirmwareUpdateInfo;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+  const [uploadStatus, setUploadStatus] = useState<FirmwareUploadStatus | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [pollInterval, setPollInterval] = useState<NodeJS.Timeout | null>(null);
+
+  // Prepare check query
+  const { data: prepareInfo, isLoading: isPreparing } = useQuery({
+    queryKey: ['firmwarePrepare', printer.id],
+    queryFn: () => firmwareApi.prepareUpload(printer.id),
+    staleTime: 30000,
+  });
+
+  // Start upload mutation
+  const uploadMutation = useMutation({
+    mutationFn: () => firmwareApi.startUpload(printer.id),
+    onSuccess: () => {
+      setIsUploading(true);
+      // Start polling for status
+      const interval = setInterval(async () => {
+        try {
+          const status = await firmwareApi.getUploadStatus(printer.id);
+          setUploadStatus(status);
+          if (status.status === 'complete' || status.status === 'error') {
+            clearInterval(interval);
+            setPollInterval(null);
+            setIsUploading(false);
+            if (status.status === 'complete') {
+              showToast('Firmware uploaded! Trigger update from printer screen.', 'success');
+              queryClient.invalidateQueries({ queryKey: ['firmwareUpdate', printer.id] });
+            }
+          }
+        } catch {
+          // Ignore errors during polling
+        }
+      }, 2000);
+      setPollInterval(interval);
+    },
+    onError: (error: Error) => {
+      showToast(`Failed to start upload: ${error.message}`, 'error');
+      setIsUploading(false);
+    },
+  });
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  }, [pollInterval]);
+
+  const handleStartUpload = () => {
+    setUploadStatus(null);
+    uploadMutation.mutate();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <Card className="w-full max-w-md mx-4">
+        <CardContent>
+          <div className="flex items-start gap-3 mb-4">
+            <div className="p-2 rounded-full bg-orange-500/20">
+              <Download className="w-5 h-5 text-orange-400" />
+            </div>
+            <div className="flex-1">
+              <h3 className="text-lg font-semibold text-white">Firmware Update</h3>
+              <p className="text-sm text-bambu-gray mt-1">
+                {printer.name}
+              </p>
+            </div>
+          </div>
+
+          {/* Version Info */}
+          <div className="bg-bambu-dark rounded-lg p-3 mb-4">
+            <div className="flex justify-between items-center text-sm">
+              <span className="text-bambu-gray">Current:</span>
+              <span className="text-white font-mono">{firmwareInfo.current_version || 'Unknown'}</span>
+            </div>
+            <div className="flex justify-between items-center text-sm mt-1">
+              <span className="text-bambu-gray">Latest:</span>
+              <span className="text-orange-400 font-mono">{firmwareInfo.latest_version}</span>
+            </div>
+            {firmwareInfo.release_notes && (
+              <details className="mt-3 text-sm">
+                <summary className="text-orange-400 cursor-pointer hover:underline">
+                  Release Notes
+                </summary>
+                <div className="mt-2 text-bambu-gray text-xs max-h-40 overflow-y-auto whitespace-pre-wrap">
+                  {firmwareInfo.release_notes}
+                </div>
+              </details>
+            )}
+          </div>
+
+          {/* Status / Progress */}
+          {isPreparing ? (
+            <div className="flex items-center gap-2 text-bambu-gray text-sm mb-4">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Checking prerequisites...
+            </div>
+          ) : prepareInfo && !isUploading && !uploadStatus ? (
+            <div className="mb-4">
+              {prepareInfo.can_proceed ? (
+                <div className="flex items-center gap-2 text-bambu-green text-sm">
+                  <Box className="w-4 h-4" />
+                  SD card ready. Click below to upload firmware.
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {prepareInfo.errors.map((error, i) => (
+                    <div key={i} className="flex items-center gap-2 text-red-400 text-sm">
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      {error}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {/* Upload Progress */}
+          {(isUploading || uploadStatus) && uploadStatus && (
+            <div className="mb-4">
+              <div className="flex items-center justify-between text-sm mb-1">
+                <span className="text-bambu-gray capitalize">{uploadStatus.status}</span>
+                <span className="text-white">{uploadStatus.progress}%</span>
+              </div>
+              <div className="w-full bg-bambu-dark-tertiary rounded-full h-2">
+                <div
+                  className={`h-2 rounded-full transition-all ${
+                    uploadStatus.status === 'error' ? 'bg-red-500' :
+                    uploadStatus.status === 'complete' ? 'bg-bambu-green' : 'bg-orange-500'
+                  } ${uploadStatus.status === 'uploading' ? 'animate-pulse' : ''}`}
+                  style={{ width: `${uploadStatus.progress}%` }}
+                />
+              </div>
+              <p className="text-xs text-bambu-gray mt-1">{uploadStatus.message}</p>
+              {uploadStatus.error && (
+                <p className="text-xs text-red-400 mt-1">{uploadStatus.error}</p>
+              )}
+            </div>
+          )}
+
+          {/* Success Message */}
+          {uploadStatus?.status === 'complete' && (
+            <div className="bg-bambu-green/10 border border-bambu-green/30 rounded-lg p-3 mb-4">
+              <p className="text-sm text-bambu-green font-medium mb-2">
+                Firmware uploaded to SD card!
+              </p>
+              <p className="text-xs text-bambu-gray">
+                To apply the update on your printer:
+              </p>
+              <ol className="text-xs text-bambu-gray mt-1 list-decimal list-inside space-y-1">
+                <li>On the printer's touchscreen, go to <strong className="text-white">Settings</strong></li>
+                <li>Navigate to <strong className="text-white">Firmware</strong></li>
+                <li>Select <strong className="text-white">Update from SD card</strong></li>
+                <li>The update will take 10-20 minutes</li>
+              </ol>
+            </div>
+          )}
+
+          {/* Buttons */}
+          <div className="flex gap-2 justify-end">
+            <Button variant="secondary" onClick={onClose}>
+              {uploadStatus?.status === 'complete' ? 'Done' : 'Cancel'}
+            </Button>
+            {prepareInfo?.can_proceed && !isUploading && uploadStatus?.status !== 'complete' && (
+              <Button
+                onClick={handleStartUpload}
+                disabled={uploadMutation.isPending}
+              >
+                {uploadMutation.isPending ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                    Starting...
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4 mr-2" />
+                    Upload Firmware
+                  </>
+                )}
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function EditPrinterModal({
   printer,
   onClose,
@@ -3338,14 +3650,13 @@ export function PrintersPage() {
   const [sortAsc, setSortAsc] = useState<boolean>(() => {
     return localStorage.getItem('printerSortAsc') !== 'false';
   });
-  const [viewMode, setViewMode] = useState<ViewMode>(() => {
-    return (localStorage.getItem('printerViewMode') as ViewMode) || 'expanded';
-  });
   // Card size: 1=small, 2=medium, 3=large, 4=xl
   const [cardSize, setCardSize] = useState<number>(() => {
     const saved = localStorage.getItem('printerCardSize');
     return saved ? parseInt(saved, 10) : 2; // Default to medium
   });
+  // Derive viewMode from cardSize: S=compact, M/L/XL=expanded
+  const viewMode: ViewMode = cardSize === 1 ? 'compact' : 'expanded';
   const queryClient = useQueryClient();
 
   const { data: printers, isLoading } = useQuery({
@@ -3417,6 +3728,7 @@ export function PrintersPage() {
     mutationFn: api.createPrinter,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['printers'] });
+      queryClient.invalidateQueries({ queryKey: ['maintenanceOverview'] });
       setShowAddModal(false);
     },
   });
@@ -3449,26 +3761,14 @@ export function PrintersPage() {
     localStorage.setItem('printerSortAsc', String(newAsc));
   };
 
-  const toggleViewMode = () => {
-    const newMode = viewMode === 'expanded' ? 'compact' : 'expanded';
-    setViewMode(newMode);
-    localStorage.setItem('printerViewMode', newMode);
-  };
-
-  const changeCardSize = (delta: number) => {
-    const newSize = Math.max(1, Math.min(4, cardSize + delta));
-    setCardSize(newSize);
-    localStorage.setItem('printerCardSize', String(newSize));
-  };
-
   // Grid classes based on card size (1=small, 2=medium, 3=large, 4=xl)
   const getGridClasses = () => {
     switch (cardSize) {
-      case 1: return 'grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5';
-      case 2: return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3';
-      case 3: return 'grid-cols-1 md:grid-cols-2';
-      case 4: return 'grid-cols-1 max-w-3xl';
-      default: return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3';
+      case 1: return 'grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5'; // S: many small cards
+      case 2: return 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3'; // M: medium cards
+      case 3: return 'grid-cols-1 lg:grid-cols-2'; // L: large cards, 2 columns max
+      case 4: return 'grid-cols-1'; // XL: single column, full width
+      default: return 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3';
     }
   };
 
@@ -3567,40 +3867,33 @@ export function PrintersPage() {
             </button>
           </div>
 
-          {/* View mode toggle */}
-          <button
-            onClick={toggleViewMode}
-            className="p-1.5 rounded-lg hover:bg-bambu-dark-tertiary transition-colors"
-            title={viewMode === 'expanded' ? 'Switch to compact view' : 'Switch to expanded view'}
-          >
-            {viewMode === 'expanded' ? (
-              <LayoutList className="w-5 h-5 text-bambu-gray" />
-            ) : (
-              <LayoutGrid className="w-5 h-5 text-bambu-gray" />
-            )}
-          </button>
-
-          {/* Card size control */}
-          <div className="flex items-center gap-1 bg-bambu-dark rounded-lg border border-bambu-dark-tertiary">
-            <button
-              onClick={() => changeCardSize(-1)}
-              disabled={cardSize <= 1}
-              className="p-1.5 rounded-l-lg hover:bg-bambu-dark-tertiary transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              title="Smaller cards"
-            >
-              <Minus className="w-4 h-4 text-bambu-gray" />
-            </button>
-            <span className="text-xs text-bambu-gray w-6 text-center font-medium">
-              {cardSizeLabels[cardSize - 1]}
-            </span>
-            <button
-              onClick={() => changeCardSize(1)}
-              disabled={cardSize >= 4}
-              className="p-1.5 rounded-r-lg hover:bg-bambu-dark-tertiary transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              title="Larger cards"
-            >
-              <Plus className="w-4 h-4 text-bambu-gray" />
-            </button>
+          {/* Card size selector */}
+          <div className="flex items-center bg-bambu-dark rounded-lg border border-bambu-dark-tertiary">
+            {cardSizeLabels.map((label, index) => {
+              const size = index + 1;
+              const isSelected = cardSize === size;
+              return (
+                <button
+                  key={label}
+                  onClick={() => {
+                    setCardSize(size);
+                    localStorage.setItem('printerCardSize', String(size));
+                  }}
+                  className={`px-2 py-1.5 text-xs font-medium transition-colors ${
+                    index === 0 ? 'rounded-l-lg' : ''
+                  } ${
+                    index === cardSizeLabels.length - 1 ? 'rounded-r-lg' : ''
+                  } ${
+                    isSelected
+                      ? 'bg-bambu-green text-white'
+                      : 'text-bambu-gray hover:bg-bambu-dark-tertiary hover:text-white'
+                  }`}
+                  title={`${label === 'S' ? 'Small' : label === 'M' ? 'Medium' : label === 'L' ? 'Large' : 'Extra large'} cards`}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
 
           <div className="w-px h-6 bg-bambu-dark-tertiary" />
@@ -3695,6 +3988,7 @@ export function PrintersPage() {
                     hideIfDisconnected={hideDisconnected}
                     maintenanceInfo={maintenanceByPrinter[printer.id]}
                     viewMode={viewMode}
+                    cardSize={cardSize}
                     amsThresholds={settings ? {
                       humidityGood: Number(settings.ams_humidity_good) || 40,
                       humidityFair: Number(settings.ams_humidity_fair) || 60,
@@ -3703,6 +3997,7 @@ export function PrintersPage() {
                     } : undefined}
                     spoolmanEnabled={spoolmanEnabled}
                     hasUnlinkedSpools={hasUnlinkedSpools}
+                    timeFormat={settings?.time_format || 'system'}
                   />
                 ))}
               </div>
@@ -3719,6 +4014,7 @@ export function PrintersPage() {
               hideIfDisconnected={hideDisconnected}
               maintenanceInfo={maintenanceByPrinter[printer.id]}
               viewMode={viewMode}
+              cardSize={cardSize}
               spoolmanEnabled={spoolmanEnabled}
               hasUnlinkedSpools={hasUnlinkedSpools}
               amsThresholds={settings ? {
@@ -3727,6 +4023,7 @@ export function PrintersPage() {
                 tempGood: Number(settings.ams_temp_good) || 28,
                 tempFair: Number(settings.ams_temp_fair) || 35,
               } : undefined}
+              timeFormat={settings?.time_format || 'system'}
             />
           ))}
         </div>

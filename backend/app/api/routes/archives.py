@@ -12,7 +12,7 @@ from backend.app.core.config import settings
 from backend.app.core.database import get_db
 from backend.app.models.archive import PrintArchive
 from backend.app.models.filament import Filament
-from backend.app.schemas.archive import ArchiveResponse, ArchiveStats, ArchiveUpdate
+from backend.app.schemas.archive import ArchiveResponse, ArchiveStats, ArchiveUpdate, ReprintRequest
 from backend.app.services.archive import ArchiveService
 
 logger = logging.getLogger(__name__)
@@ -909,7 +909,12 @@ async def scan_timelapse(
 ):
     """Scan printer for timelapse matching this archive and attach it."""
     from backend.app.models.printer import Printer
-    from backend.app.services.bambu_ftp import download_file_bytes_async, list_files_async
+    from backend.app.services.bambu_ftp import (
+        download_file_bytes_async,
+        get_ftp_retry_settings,
+        list_files_async,
+        with_ftp_retry,
+    )
 
     service = ArchiveService(db)
     archive = await service.get_archive(archive_id)
@@ -1081,7 +1086,30 @@ async def scan_timelapse(
 
     # Download the timelapse - use the full path from the file listing
     remote_path = matching_file.get("path") or f"/timelapse/{matching_file['name']}"
-    timelapse_data = await download_file_bytes_async(printer.ip_address, printer.access_code, remote_path)
+
+    # Get FTP retry settings
+    ftp_retry_enabled, ftp_retry_count, ftp_retry_delay, ftp_timeout = await get_ftp_retry_settings()
+
+    if ftp_retry_enabled:
+        timelapse_data = await with_ftp_retry(
+            download_file_bytes_async,
+            printer.ip_address,
+            printer.access_code,
+            remote_path,
+            socket_timeout=ftp_timeout,
+            printer_model=printer.model,
+            max_retries=ftp_retry_count,
+            retry_delay=ftp_retry_delay,
+            operation_name=f"Download timelapse {matching_file['name']}",
+        )
+    else:
+        timelapse_data = await download_file_bytes_async(
+            printer.ip_address,
+            printer.access_code,
+            remote_path,
+            socket_timeout=ftp_timeout,
+            printer_model=printer.model,
+        )
 
     if not timelapse_data:
         raise HTTPException(500, "Failed to download timelapse")
@@ -1107,7 +1135,12 @@ async def select_timelapse(
 ):
     """Manually select a timelapse from the printer to attach."""
     from backend.app.models.printer import Printer
-    from backend.app.services.bambu_ftp import download_file_bytes_async, list_files_async
+    from backend.app.services.bambu_ftp import (
+        download_file_bytes_async,
+        get_ftp_retry_settings,
+        list_files_async,
+        with_ftp_retry,
+    )
 
     service = ArchiveService(db)
     archive = await service.get_archive(archive_id)
@@ -1141,7 +1174,29 @@ async def select_timelapse(
         raise HTTPException(404, f"Timelapse '{filename}' not found on printer")
 
     # Download and attach
-    timelapse_data = await download_file_bytes_async(printer.ip_address, printer.access_code, remote_path)
+    ftp_retry_enabled, ftp_retry_count, ftp_retry_delay, ftp_timeout = await get_ftp_retry_settings()
+
+    if ftp_retry_enabled:
+        timelapse_data = await with_ftp_retry(
+            download_file_bytes_async,
+            printer.ip_address,
+            printer.access_code,
+            remote_path,
+            socket_timeout=ftp_timeout,
+            printer_model=printer.model,
+            max_retries=ftp_retry_count,
+            retry_delay=ftp_retry_delay,
+            operation_name=f"Download timelapse {filename}",
+        )
+    else:
+        timelapse_data = await download_file_bytes_async(
+            printer.ip_address,
+            printer.access_code,
+            remote_path,
+            socket_timeout=ftp_timeout,
+            printer_model=printer.model,
+        )
+
     if not timelapse_data:
         raise HTTPException(500, "Failed to download timelapse")
 
@@ -1464,16 +1519,20 @@ async def get_qrcode(
     db: AsyncSession = Depends(get_db),
 ):
     """Generate a QR code that links to this archive."""
-    import qrcode
+    try:
+        import qrcode
+        from PIL import Image as PILImage
+    except ImportError:
+        raise HTTPException(500, "QR code generation not available - qrcode package not installed")
 
     result = await db.execute(select(PrintArchive).where(PrintArchive.id == archive_id))
     archive = result.scalar_one_or_none()
     if not archive:
         raise HTTPException(404, "Archive not found")
 
-    # Build URL to archive detail page
+    # Build URL to archive download
     base_url = str(request.base_url).rstrip("/")
-    archive_url = f"{base_url}/archives?id={archive_id}"
+    archive_url = f"{base_url}/api/v1/archives/{archive_id}/download"
 
     # Generate QR code
     qr = qrcode.QRCode(
@@ -1487,13 +1546,16 @@ async def get_qrcode(
 
     img = qr.make_image(fill_color="black", back_color="white")
 
+    # Convert to PIL Image for resizing
+    pil_img = img.get_image()
+
     # Resize if needed
     if size != 200:
-        img = img.resize((size, size))
+        pil_img = pil_img.resize((size, size), PILImage.Resampling.LANCZOS)
 
     # Convert to bytes
     buffer = io.BytesIO()
-    img.save(buffer, format="PNG")
+    pil_img.save(buffer, format="PNG")
     buffer.seek(0)
 
     return Response(
@@ -1974,13 +2036,22 @@ async def get_filament_requirements(
 async def reprint_archive(
     archive_id: int,
     printer_id: int,
+    body: ReprintRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Send an archived 3MF file to a printer and start printing."""
     from backend.app.main import register_expected_print
     from backend.app.models.printer import Printer
-    from backend.app.services.bambu_ftp import upload_file_async
+    from backend.app.services.bambu_ftp import (
+        get_ftp_retry_settings,
+        upload_file_async,
+        with_ftp_retry,
+    )
     from backend.app.services.printer_manager import printer_manager
+
+    # Use defaults if no body provided
+    if body is None:
+        body = ReprintRequest()
 
     # Get archive
     service = ArchiveService(db)
@@ -2016,19 +2087,40 @@ async def reprint_archive(
     remote_filename = f"{base_name}.3mf"
     remote_path = f"/{remote_filename}"
 
+    # Get FTP retry settings
+    ftp_retry_enabled, ftp_retry_count, ftp_retry_delay, ftp_timeout = await get_ftp_retry_settings()
+
     # Delete existing file if present (avoids 553 error)
     await delete_file_async(
         printer.ip_address,
         printer.access_code,
         remote_path,
+        socket_timeout=ftp_timeout,
+        printer_model=printer.model,
     )
 
-    uploaded = await upload_file_async(
-        printer.ip_address,
-        printer.access_code,
-        file_path,
-        remote_path,
-    )
+    if ftp_retry_enabled:
+        uploaded = await with_ftp_retry(
+            upload_file_async,
+            printer.ip_address,
+            printer.access_code,
+            file_path,
+            remote_path,
+            socket_timeout=ftp_timeout,
+            printer_model=printer.model,
+            max_retries=ftp_retry_count,
+            retry_delay=ftp_retry_delay,
+            operation_name=f"Upload for reprint to {printer.name}",
+        )
+    else:
+        uploaded = await upload_file_async(
+            printer.ip_address,
+            printer.access_code,
+            file_path,
+            remote_path,
+            socket_timeout=ftp_timeout,
+            printer_model=printer.model,
+        )
 
     if not uploaded:
         raise HTTPException(500, "Failed to upload file to printer")
@@ -2049,10 +2141,26 @@ async def reprint_archive(
     except Exception:
         pass  # Default to plate 1 if detection fails
 
-    logger.info(f"Reprint archive {archive_id}: using plate_id={plate_id}")
+    logger.info(
+        f"Reprint archive {archive_id}: plate_id={plate_id}, "
+        f"ams_mapping={body.ams_mapping}, bed_levelling={body.bed_levelling}, "
+        f"flow_cali={body.flow_cali}, vibration_cali={body.vibration_cali}, "
+        f"layer_inspect={body.layer_inspect}, timelapse={body.timelapse}"
+    )
 
-    # Start the print
-    started = printer_manager.start_print(printer_id, remote_filename, plate_id)
+    # Start the print with options
+    started = printer_manager.start_print(
+        printer_id,
+        remote_filename,
+        plate_id,
+        ams_mapping=body.ams_mapping,
+        timelapse=body.timelapse,
+        bed_levelling=body.bed_levelling,
+        flow_cali=body.flow_cali,
+        vibration_cali=body.vibration_cali,
+        layer_inspect=body.layer_inspect,
+        use_ams=body.use_ams,
+    )
 
     if not started:
         raise HTTPException(500, "Failed to start print")

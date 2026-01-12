@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
@@ -59,6 +59,7 @@ from backend.app.api.routes import (
     discovery,
     external_links,
     filaments,
+    firmware,
     kprofiles,
     maintenance,
     notification_templates,
@@ -70,17 +71,19 @@ from backend.app.api.routes import (
     settings as settings_routes,
     smart_plugs,
     spoolman,
+    support,
     system,
     updates,
     webhook,
     websocket,
 )
 from backend.app.api.routes.maintenance import _get_printer_maintenance_internal, ensure_default_types
+from backend.app.api.routes.support import init_debug_logging
 from backend.app.core.database import async_session, init_db
 from backend.app.core.websocket import ws_manager
 from backend.app.models.smart_plug import SmartPlug
 from backend.app.services.archive import ArchiveService
-from backend.app.services.bambu_ftp import download_file_async
+from backend.app.services.bambu_ftp import download_file_async, get_ftp_retry_settings, with_ftp_retry
 from backend.app.services.bambu_mqtt import PrinterState
 from backend.app.services.notification_service import notification_service
 from backend.app.services.print_scheduler import scheduler as print_scheduler
@@ -441,8 +444,6 @@ async def on_print_start(printer_id: int, data: dict):
         if expected_archive_id:
             # This is a reprint/scheduled print - use existing archive, don't create new one
             logger.info(f"Using expected archive {expected_archive_id} for print (skipping duplicate)")
-            from datetime import datetime
-
             from backend.app.models.archive import PrintArchive
 
             result = await db.execute(select(PrintArchive).where(PrintArchive.id == expected_archive_id))
@@ -513,30 +514,46 @@ async def on_print_start(printer_id: int, data: dict):
         )
         existing_archive = existing.scalar_one_or_none()
         if existing_archive:
-            logger.info(f"Skipping duplicate - already have printing archive {existing_archive.id} for {check_name}")
-            # Track this as the active print
-            _active_prints[(printer_id, existing_archive.filename)] = existing_archive.id
-            # Also set up energy tracking if not already tracked
-            if existing_archive.id not in _print_energy_start:
-                try:
-                    plug_result = await db.execute(select(SmartPlug).where(SmartPlug.printer_id == printer_id))
-                    plug = plug_result.scalar_one_or_none()
-                    if plug:
-                        energy = await tasmota_service.get_energy(plug)
-                        if energy and energy.get("total") is not None:
-                            _print_energy_start[existing_archive.id] = energy["total"]
-                            logger.info(
-                                f"Recorded starting energy for existing archive {existing_archive.id}: {energy['total']} kWh"
-                            )
-                except Exception as e:
-                    logger.warning(f"Failed to record starting energy for existing archive: {e}")
-            # Send notification with archive data (existing archive)
-            if not notification_sent:
-                archive_data = {"print_time_seconds": existing_archive.print_time_seconds}
-                await _send_print_start_notification(printer_id, data, archive_data, logger)
-            # Extract printable objects from the archived 3MF file
-            _load_objects_from_archive(existing_archive, printer_id, logger)
-            return
+            # Check if archive is stale (older than 4 hours) - likely a failed/cancelled print
+            # that didn't get properly updated
+            archive_age = datetime.now(UTC) - existing_archive.created_at.replace(tzinfo=UTC)
+            if archive_age.total_seconds() > 4 * 60 * 60:  # 4 hours
+                logger.warning(
+                    f"Found stale 'printing' archive {existing_archive.id} (age: {archive_age}), "
+                    f"marking as cancelled and creating new archive"
+                )
+                existing_archive.status = "cancelled"
+                existing_archive.failure_reason = "Stale - print likely cancelled or failed without status update"
+                await db.commit()
+                # Fall through to create new archive (don't return)
+                existing_archive = None  # Clear so we don't use stale archive
+            else:
+                logger.info(
+                    f"Skipping duplicate - already have printing archive {existing_archive.id} for {check_name}"
+                )
+                # Track this as the active print
+                _active_prints[(printer_id, existing_archive.filename)] = existing_archive.id
+                # Also set up energy tracking if not already tracked
+                if existing_archive.id not in _print_energy_start:
+                    try:
+                        plug_result = await db.execute(select(SmartPlug).where(SmartPlug.printer_id == printer_id))
+                        plug = plug_result.scalar_one_or_none()
+                        if plug:
+                            energy = await tasmota_service.get_energy(plug)
+                            if energy and energy.get("total") is not None:
+                                _print_energy_start[existing_archive.id] = energy["total"]
+                                logger.info(
+                                    f"Recorded starting energy for existing archive {existing_archive.id}: {energy['total']} kWh"
+                                )
+                    except Exception as e:
+                        logger.warning(f"Failed to record starting energy for existing archive: {e}")
+                # Send notification with archive data (existing archive)
+                if not notification_sent:
+                    archive_data = {"print_time_seconds": existing_archive.print_time_seconds}
+                    await _send_print_start_notification(printer_id, data, archive_data, logger)
+                # Extract printable objects from the archived 3MF file
+                _load_objects_from_archive(existing_archive, printer_id, logger)
+                return
 
         # Build list of possible 3MF filenames to try
         possible_names = []
@@ -572,6 +589,9 @@ async def on_print_start(printer_id: int, data: dict):
         temp_path = None
         downloaded_filename = None
 
+        # Get FTP retry settings
+        ftp_retry_enabled, ftp_retry_count, ftp_retry_delay, ftp_timeout = await get_ftp_retry_settings()
+
         for try_filename in possible_names:
             if not try_filename.endswith(".3mf"):
                 continue
@@ -588,12 +608,29 @@ async def on_print_start(printer_id: int, data: dict):
             for remote_path in remote_paths:
                 logger.debug(f"Trying FTP download: {remote_path}")
                 try:
-                    if await download_file_async(
-                        printer.ip_address,
-                        printer.access_code,
-                        remote_path,
-                        temp_path,
-                    ):
+                    if ftp_retry_enabled:
+                        downloaded = await with_ftp_retry(
+                            download_file_async,
+                            printer.ip_address,
+                            printer.access_code,
+                            remote_path,
+                            temp_path,
+                            socket_timeout=ftp_timeout,
+                            printer_model=printer.model,
+                            max_retries=ftp_retry_count,
+                            retry_delay=ftp_retry_delay,
+                            operation_name=f"Download 3MF from {remote_path}",
+                        )
+                    else:
+                        downloaded = await download_file_async(
+                            printer.ip_address,
+                            printer.access_code,
+                            remote_path,
+                            temp_path,
+                            socket_timeout=ftp_timeout,
+                            printer_model=printer.model,
+                        )
+                    if downloaded:
                         downloaded_filename = try_filename
                         logger.info(f"Downloaded: {remote_path}")
                         break
@@ -621,12 +658,25 @@ async def on_print_start(printer_id: int, data: dict):
                         logger.info(f"Found matching file: {fname}")
                         temp_path = app_settings.archive_dir / "temp" / fname
                         temp_path.parent.mkdir(parents=True, exist_ok=True)
-                        if await download_file_async(
-                            printer.ip_address,
-                            printer.access_code,
-                            f"/cache/{fname}",
-                            temp_path,
-                        ):
+                        if ftp_retry_enabled:
+                            downloaded = await with_ftp_retry(
+                                download_file_async,
+                                printer.ip_address,
+                                printer.access_code,
+                                f"/cache/{fname}",
+                                temp_path,
+                                max_retries=ftp_retry_count,
+                                retry_delay=ftp_retry_delay,
+                                operation_name=f"Download 3MF from /cache/{fname}",
+                            )
+                        else:
+                            downloaded = await download_file_async(
+                                printer.ip_address,
+                                printer.access_code,
+                                f"/cache/{fname}",
+                                temp_path,
+                            )
+                        if downloaded:
                             downloaded_filename = fname
                             logger.info(f"Found and downloaded from cache: {fname}")
                             break
@@ -1151,7 +1201,7 @@ async def on_print_complete(printer_id: int, data: dict):
         try:
             logger.info(f"[PHOTO-BG] Starting finish photo capture for archive {archive_id}")
 
-            from backend.app.api.routes.camera import _active_streams, get_buffered_frame
+            from backend.app.api.routes.camera import _active_chamber_streams, _active_streams, get_buffered_frame
 
             async with async_session() as db:
                 from backend.app.api.routes.settings import get_setting
@@ -1179,10 +1229,14 @@ async def on_print_complete(printer_id: int, data: dict):
                             photo_filename = None
 
                             # Check if camera stream is active - use buffered frame to avoid freeze
+                            # Check both RTSP streams (_active_streams) and chamber image streams (_active_chamber_streams)
                             active_for_printer = [k for k in _active_streams if k.startswith(f"{printer_id}-")]
+                            active_chamber_for_printer = [
+                                k for k in _active_chamber_streams if k.startswith(f"{printer_id}-")
+                            ]
                             buffered_frame = get_buffered_frame(printer_id)
 
-                            if active_for_printer and buffered_frame:
+                            if (active_for_printer or active_chamber_for_printer) and buffered_frame:
                                 # Use frame from active stream
                                 logger.info("[PHOTO-BG] Using buffered frame from active stream")
                                 photos_dir = archive_dir / "photos"
@@ -1609,19 +1663,13 @@ async def track_printer_runtime():
                         # Calculate time since last update
                         if printer.last_runtime_update:
                             elapsed = (now - printer.last_runtime_update).total_seconds()
-                            # Sanity check: don't add more than 2x the interval (handles server restarts)
-                            if elapsed > 0 and elapsed < RUNTIME_TRACKING_INTERVAL * 2:
+                            if elapsed > 0:
                                 printer.runtime_seconds += int(elapsed)
                                 updated_count += 1
                                 needs_commit = True
                                 logger.debug(
                                     f"[{printer.name}] Runtime tracking: added {int(elapsed)}s, "
                                     f"total={printer.runtime_seconds}s ({printer.runtime_seconds / 3600:.2f}h)"
-                                )
-                            else:
-                                logger.warning(
-                                    f"[{printer.name}] Runtime tracking: skipped elapsed={elapsed:.1f}s "
-                                    f"(outside valid range 0-{RUNTIME_TRACKING_INTERVAL * 2}s)"
                                 )
                         else:
                             # First time seeing printer active - need to commit to save timestamp
@@ -1673,6 +1721,9 @@ def stop_runtime_tracking():
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
+
+    # Restore debug logging state from previous session
+    await init_debug_logging()
 
     # Set up printer manager callbacks
     loop = asyncio.get_event_loop()
@@ -1795,9 +1846,11 @@ app.include_router(api_keys.router, prefix=app_settings.api_prefix)
 app.include_router(webhook.router, prefix=app_settings.api_prefix)
 app.include_router(ams_history.router, prefix=app_settings.api_prefix)
 app.include_router(system.router, prefix=app_settings.api_prefix)
+app.include_router(support.router, prefix=app_settings.api_prefix)
 app.include_router(websocket.router, prefix=app_settings.api_prefix)
 app.include_router(discovery.router, prefix=app_settings.api_prefix)
 app.include_router(pending_uploads.router, prefix=app_settings.api_prefix)
+app.include_router(firmware.router, prefix=app_settings.api_prefix)
 
 
 # Serve static files (React build)

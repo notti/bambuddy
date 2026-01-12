@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { X, Printer, Loader2, AlertTriangle, Check, Circle, RefreshCw } from 'lucide-react';
+import { X, Printer, Loader2, AlertTriangle, Check, Circle, RefreshCw, ChevronDown, ChevronUp, Settings } from 'lucide-react';
 import { api } from '../api/client';
 import { Card, CardContent } from './Card';
 import { Button } from './Button';
+import { getColorName } from '../utils/colors';
 
 interface ReprintModalProps {
   archiveId: number;
@@ -12,10 +13,36 @@ interface ReprintModalProps {
   onSuccess: () => void;
 }
 
+// Print options with defaults
+interface PrintOptions {
+  timelapse: boolean;
+  bed_levelling: boolean;
+  flow_cali: boolean;
+  vibration_cali: boolean;
+  layer_inspect: boolean;
+}
+
+const DEFAULT_PRINT_OPTIONS: PrintOptions = {
+  bed_levelling: true,
+  flow_cali: false,
+  vibration_cali: true,
+  layer_inspect: false,
+  timelapse: false,
+};
+
 export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: ReprintModalProps) {
   const queryClient = useQueryClient();
   const [selectedPrinter, setSelectedPrinter] = useState<number | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showOptions, setShowOptions] = useState(false);
+  const [printOptions, setPrintOptions] = useState<PrintOptions>(DEFAULT_PRINT_OPTIONS);
+  // Manual slot overrides: slot_id (1-indexed) -> globalTrayId
+  const [manualMappings, setManualMappings] = useState<Record<number, number>>({});
+
+  // Clear manual mappings when printer changes
+  useEffect(() => {
+    setManualMappings({});
+  }, [selectedPrinter]);
 
   // Close on Escape key
   useEffect(() => {
@@ -47,7 +74,10 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
   const reprintMutation = useMutation({
     mutationFn: () => {
       if (!selectedPrinter) throw new Error('No printer selected');
-      return api.reprintArchive(archiveId, selectedPrinter);
+      return api.reprintArchive(archiveId, selectedPrinter, {
+        ams_mapping: amsMapping,
+        ...printOptions,
+      });
     },
     onSuccess: () => {
       onSuccess();
@@ -73,16 +103,25 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
     return `AMS-${letter} Slot ${trayId + 1}`;
   };
 
+  // Calculate global tray ID for MQTT command
+  // Regular AMS: (ams_id * 4) + slot_id, External: 254
+  const getGlobalTrayId = (amsId: number, trayId: number, isExternal: boolean): number => {
+    if (isExternal) return 254;
+    return amsId * 4 + trayId;
+  };
+
   // Build a list of all loaded filaments from printer's AMS/HT/External with location info
   const loadedFilaments = useMemo(() => {
     const filaments: Array<{
       type: string;
       color: string;
+      colorName: string;
       amsId: number;
       trayId: number;
       isHt: boolean;
       isExternal: boolean;
       label: string;
+      globalTrayId: number;
     }> = [];
 
     // Add filaments from all AMS units (regular and HT)
@@ -90,14 +129,17 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
       const isHt = amsUnit.tray.length === 1; // AMS-HT has single tray
       amsUnit.tray.forEach((tray) => {
         if (tray.tray_type) {
+          const color = normalizeColor(tray.tray_color);
           filaments.push({
             type: tray.tray_type,
-            color: normalizeColor(tray.tray_color),
+            color,
+            colorName: getColorName(color),
             amsId: amsUnit.id,
             trayId: tray.id,
             isHt,
             isExternal: false,
             label: formatSlotLabel(amsUnit.id, tray.id, isHt, false),
+            globalTrayId: getGlobalTrayId(amsUnit.id, tray.id, false),
           });
         }
       });
@@ -105,14 +147,17 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
 
     // Add external spool if loaded
     if (printerStatus?.vt_tray?.tray_type) {
+      const color = normalizeColor(printerStatus.vt_tray.tray_color);
       filaments.push({
         type: printerStatus.vt_tray.tray_type,
-        color: normalizeColor(printerStatus.vt_tray.tray_color),
+        color,
+        colorName: getColorName(color),
         amsId: -1,
         trayId: 0,
         isHt: false,
         isExternal: true,
         label: 'External',
+        globalTrayId: 254,
       });
     }
 
@@ -121,6 +166,7 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
 
   // Compare required filaments with loaded filaments
   // Match by filament TYPE (not slot), since the printer dynamically maps slots
+  // Respects manual overrides when set
   const filamentComparison = useMemo(() => {
     if (!filamentReqs?.filaments || filamentReqs.filaments.length === 0) return [];
 
@@ -149,21 +195,67 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
              Math.abs(b1 - b2) <= threshold;
     };
 
+    // Track which trays have been assigned to avoid duplicates
+    // First, mark all manually assigned trays as used
+    const usedTrayIds = new Set<number>(Object.values(manualMappings));
+
     return filamentReqs.filaments.map((req) => {
-      // Find a loaded filament that matches by TYPE (printer will auto-map the slot)
+      const slotId = req.slot_id || 0;
+
+      // Check if there's a manual override for this slot
+      if (slotId > 0 && manualMappings[slotId] !== undefined) {
+        const manualTrayId = manualMappings[slotId];
+        const manualLoaded = loadedFilaments.find((f) => f.globalTrayId === manualTrayId);
+
+        if (manualLoaded) {
+          const typeMatch = manualLoaded.type?.toUpperCase() === req.type?.toUpperCase();
+          const colorMatch = normalizeColorForCompare(manualLoaded.color) === normalizeColorForCompare(req.color) ||
+                            colorsAreSimilar(manualLoaded.color, req.color);
+
+          let status: 'match' | 'type_only' | 'mismatch' | 'empty';
+          if (typeMatch && colorMatch) {
+            status = 'match';
+          } else if (typeMatch) {
+            status = 'type_only';
+          } else {
+            status = 'mismatch';
+          }
+
+          return {
+            ...req,
+            loaded: manualLoaded,
+            hasFilament: true,
+            typeMatch,
+            colorMatch,
+            status,
+            isManual: true,
+          };
+        }
+      }
+
+      // Auto-match: Find a loaded filament that matches by TYPE
       // Priority: exact color match > similar color match > type-only match
+      // IMPORTANT: Exclude trays that are already assigned (manually or auto)
       const exactMatch = loadedFilaments.find(
-        (f) => f.type?.toUpperCase() === req.type?.toUpperCase() &&
+        (f) => !usedTrayIds.has(f.globalTrayId) &&
+               f.type?.toUpperCase() === req.type?.toUpperCase() &&
                normalizeColorForCompare(f.color) === normalizeColorForCompare(req.color)
       );
       const similarMatch = !exactMatch && loadedFilaments.find(
-        (f) => f.type?.toUpperCase() === req.type?.toUpperCase() &&
+        (f) => !usedTrayIds.has(f.globalTrayId) &&
+               f.type?.toUpperCase() === req.type?.toUpperCase() &&
                colorsAreSimilar(f.color, req.color)
       );
       const typeOnlyMatch = !exactMatch && !similarMatch && loadedFilaments.find(
-        (f) => f.type?.toUpperCase() === req.type?.toUpperCase()
+        (f) => !usedTrayIds.has(f.globalTrayId) &&
+               f.type?.toUpperCase() === req.type?.toUpperCase()
       );
       const loaded = exactMatch || similarMatch || typeOnlyMatch || undefined;
+
+      // Mark this tray as used so it won't be assigned to another slot
+      if (loaded) {
+        usedTrayIds.add(loaded.globalTrayId);
+      }
 
       const hasFilament = !!loaded;
       const typeMatch = hasFilament;
@@ -186,15 +278,40 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
         typeMatch,
         colorMatch,
         status,
+        isManual: false,
       };
     });
-  }, [filamentReqs, loadedFilaments]);
+  }, [filamentReqs, loadedFilaments, manualMappings]);
+
+  // Build AMS mapping from auto-matched filaments
+  // Format: array matching 3MF filament slot structure
+  // Position = slot_id - 1 (0-indexed), value = global tray ID or -1 for unused
+  // e.g., slots 1 and 3 used with trays 5 and 2 → [5, -1, 2, -1]
+  const amsMapping = useMemo(() => {
+    if (filamentComparison.length === 0) return undefined;
+
+    // Find the max slot_id to determine array size
+    const maxSlotId = Math.max(...filamentComparison.map((f) => f.slot_id || 0));
+    if (maxSlotId <= 0) return undefined;
+
+    // Create array with -1 for all positions
+    const mapping = new Array(maxSlotId).fill(-1);
+
+    // Fill in tray IDs at correct positions (slot_id - 1)
+    filamentComparison.forEach((f) => {
+      if (f.slot_id && f.slot_id > 0) {
+        mapping[f.slot_id - 1] = f.loaded?.globalTrayId ?? -1;
+      }
+    });
+
+    return mapping;
+  }, [filamentComparison]);
 
   const hasTypeMismatch = filamentComparison.some((f) => f.status === 'mismatch');
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-8">
-      <Card className="w-full max-w-md">
+      <Card className="w-full max-w-lg">
         <CardContent>
           {/* Header */}
           <div className="flex items-center justify-between mb-4">
@@ -303,10 +420,10 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
                   <div
                     key={idx}
                     className="grid items-center gap-2"
-                    style={{ gridTemplateColumns: '16px 1fr auto 16px 1fr 16px' }}
+                    style={{ gridTemplateColumns: '16px minmax(70px, 1fr) auto 2fr 16px' }}
                   >
                     {/* Required color */}
-                    <span title={`Required: ${item.color}`}>
+                    <span title={`Required: ${item.type} - ${getColorName(item.color)}`}>
                       <Circle
                         className="w-3 h-3 flex-shrink-0"
                         fill={item.color}
@@ -319,30 +436,50 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
                     </span>
                     {/* Arrow */}
                     <span className="text-bambu-gray">→</span>
-                    {/* Loaded color */}
-                    {item.loaded ? (
-                      <span title={`Loaded: ${item.loaded.color}`}>
-                        <Circle
-                          className="w-3 h-3 flex-shrink-0"
-                          fill={item.loaded.color}
-                          stroke={item.loaded.color}
-                        />
-                      </span>
-                    ) : (
-                      <span />
-                    )}
-                    {/* Loaded type + slot */}
-                    <span className={
-                      item.status === 'match' ? 'text-bambu-green' :
-                      item.status === 'type_only' ? 'text-yellow-400' :
-                      'text-orange-400'
-                    }>
-                      {item.loaded ? (
-                        <>{item.loaded.type} <span className="text-bambu-gray">({item.loaded.label})</span></>
-                      ) : (
-                        'Not loaded'
-                      )}
-                    </span>
+                    {/* Slot selector dropdown */}
+                    <select
+                      value={item.loaded?.globalTrayId ?? ''}
+                      onChange={(e) => {
+                        const slotId = item.slot_id || 0;
+                        if (slotId > 0) {
+                          const value = e.target.value;
+                          if (value === '') {
+                            // Clear manual override
+                            setManualMappings((prev) => {
+                              const next = { ...prev };
+                              delete next[slotId];
+                              return next;
+                            });
+                          } else {
+                            setManualMappings((prev) => ({
+                              ...prev,
+                              [slotId]: parseInt(value, 10),
+                            }));
+                          }
+                        }
+                      }}
+                      className={`flex-1 px-2 py-1 rounded border text-xs bg-bambu-dark-secondary focus:outline-none focus:ring-1 focus:ring-bambu-green ${
+                        item.status === 'match'
+                          ? 'border-bambu-green/50 text-bambu-green'
+                          : item.status === 'type_only'
+                          ? 'border-yellow-400/50 text-yellow-400'
+                          : 'border-orange-400/50 text-orange-400'
+                      } ${item.isManual ? 'ring-1 ring-blue-400/50' : ''}`}
+                      title={item.isManual ? 'Manually selected' : 'Auto-matched'}
+                    >
+                      <option value="" className="bg-bambu-dark text-bambu-gray">
+                        -- Select slot --
+                      </option>
+                      {loadedFilaments.map((f) => (
+                        <option
+                          key={f.globalTrayId}
+                          value={f.globalTrayId}
+                          className="bg-bambu-dark text-white"
+                        >
+                          {f.label}: {f.type} ({f.colorName})
+                        </option>
+                      ))}
+                    </select>
                     {/* Status icon */}
                     {item.status === 'match' ? (
                       <Check className="w-3 h-3 text-bambu-green" />
@@ -362,6 +499,50 @@ export function ReprintModal({ archiveId, archiveName, onClose, onSuccess }: Rep
                 <p className="text-xs text-orange-400 mt-2">
                   Required filament type not found in printer.
                 </p>
+              )}
+            </div>
+          )}
+
+          {/* Print Options */}
+          {selectedPrinter && (
+            <div className="mb-4">
+              <button
+                onClick={() => setShowOptions(!showOptions)}
+                className="flex items-center gap-2 text-sm text-bambu-gray hover:text-white transition-colors w-full"
+              >
+                <Settings className="w-4 h-4" />
+                <span>Print Options</span>
+                {showOptions ? <ChevronUp className="w-4 h-4 ml-auto" /> : <ChevronDown className="w-4 h-4 ml-auto" />}
+              </button>
+              {showOptions && (
+                <div className="mt-2 bg-bambu-dark rounded-lg p-3 space-y-2">
+                  {[
+                    { key: 'bed_levelling', label: 'Bed Levelling', desc: 'Auto-level bed before print' },
+                    { key: 'flow_cali', label: 'Flow Calibration', desc: 'Calibrate extrusion flow' },
+                    { key: 'vibration_cali', label: 'Vibration Calibration', desc: 'Reduce ringing artifacts' },
+                    { key: 'layer_inspect', label: 'First Layer Inspection', desc: 'AI inspection of first layer' },
+                    { key: 'timelapse', label: 'Timelapse', desc: 'Record timelapse video' },
+                  ].map(({ key, label, desc }) => (
+                    <label key={key} className="flex items-center justify-between cursor-pointer group">
+                      <div>
+                        <span className="text-sm text-white">{label}</span>
+                        <p className="text-xs text-bambu-gray">{desc}</p>
+                      </div>
+                      <div
+                        className={`relative w-10 h-5 rounded-full transition-colors ${
+                          printOptions[key as keyof PrintOptions] ? 'bg-bambu-green' : 'bg-bambu-dark-tertiary'
+                        }`}
+                        onClick={() => setPrintOptions((prev) => ({ ...prev, [key]: !prev[key as keyof PrintOptions] }))}
+                      >
+                        <div
+                          className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                            printOptions[key as keyof PrintOptions] ? 'translate-x-5' : 'translate-x-0.5'
+                          }`}
+                        />
+                      </div>
+                    </label>
+                  ))}
+                </div>
               )}
             </div>
           )}

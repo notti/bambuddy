@@ -3,7 +3,7 @@ import logging
 import re
 import zipfile
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,7 +117,10 @@ async def delete_printer(
         delete_archives: If True (default), delete all print archives for this printer.
                         If False, keep archives but remove their printer association.
     """
+    from sqlalchemy import delete as sql_delete
+
     from backend.app.models.archive import PrintArchive
+    from backend.app.models.maintenance import MaintenanceHistory, PrinterMaintenance
 
     result = await db.execute(select(Printer).where(Printer.id == printer_id))
     printer = result.scalar_one_or_none()
@@ -131,6 +134,19 @@ async def delete_printer(
         from sqlalchemy import update
 
         await db.execute(update(PrintArchive).where(PrintArchive.printer_id == printer_id).values(printer_id=None))
+
+    # Delete maintenance history and items for this printer
+    # (SQLite doesn't enforce FK cascades, so do it explicitly)
+    maintenance_ids = (
+        (await db.execute(select(PrinterMaintenance.id).where(PrinterMaintenance.printer_id == printer_id)))
+        .scalars()
+        .all()
+    )
+    if maintenance_ids:
+        await db.execute(
+            sql_delete(MaintenanceHistory).where(MaintenanceHistory.printer_maintenance_id.in_(maintenance_ids))
+        )
+        await db.execute(sql_delete(PrinterMaintenance).where(PrinterMaintenance.printer_id == printer_id))
 
     await db.delete(printer)
     await db.commit()
@@ -362,6 +378,11 @@ async def get_printer_status(printer_id: int, db: AsyncSession = Depends(get_db)
         mc_print_sub_stage=state.mc_print_sub_stage,
         last_ams_update=state.last_ams_update,
         printable_objects_count=len(state.printable_objects),
+        cooling_fan_speed=state.cooling_fan_speed,
+        big_fan1_speed=state.big_fan1_speed,
+        big_fan2_speed=state.big_fan2_speed,
+        heatbreak_fan_speed=state.heatbreak_fan_speed,
+        firmware_version=state.firmware_version,
     )
 
 
@@ -1131,6 +1152,29 @@ async def resume_print(printer_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(500, "Failed to resume print")
 
     return {"success": True, "message": "Print resume command sent"}
+
+
+@router.post("/{printer_id}/chamber-light")
+async def set_chamber_light(
+    printer_id: int,
+    on: bool = Query(..., description="True to turn on, False to turn off"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Turn the chamber light on or off."""
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(404, "Printer not found")
+
+    client = printer_manager.get_client(printer_id)
+    if not client:
+        raise HTTPException(400, "Printer not connected")
+
+    success = client.set_chamber_light(on)
+    if not success:
+        raise HTTPException(500, "Failed to control chamber light")
+
+    return {"success": True, "message": f"Chamber light {'on' if on else 'off'}"}
 
 
 @router.get("/{printer_id}/print/objects")
