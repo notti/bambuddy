@@ -103,6 +103,14 @@ const BACKUP_CATEGORIES: BackupCategory[] = [
     default: false,
     description: 'Virtual printer uploads awaiting review',
   },
+  {
+    id: 'api_keys',
+    labelKey: 'backup.categories.apiKeys',
+    defaultLabel: 'API Keys',
+    icon: <Key className="w-4 h-4" />,
+    default: false,
+    description: 'Webhook API keys (new keys generated on import)',
+  },
 ];
 
 interface BackupModalProps {

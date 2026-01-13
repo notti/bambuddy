@@ -1816,10 +1816,18 @@ export const api = {
       if (categories.maintenance !== undefined) params.set('include_maintenance', String(categories.maintenance));
       if (categories.archives !== undefined) params.set('include_archives', String(categories.archives));
       if (categories.projects !== undefined) params.set('include_projects', String(categories.projects));
+      if (categories.pending_uploads !== undefined) params.set('include_pending_uploads', String(categories.pending_uploads));
       if (categories.access_codes !== undefined) params.set('include_access_codes', String(categories.access_codes));
+      if (categories.api_keys !== undefined) params.set('include_api_keys', String(categories.api_keys));
     }
     const url = `${API_BASE}/settings/backup${params.toString() ? '?' + params.toString() : ''}`;
     const response = await fetch(url);
+
+    // Check for errors
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || `Backup failed with status ${response.status}`);
+    }
 
     // Get filename from Content-Disposition header
     const contentDisposition = response.headers.get('Content-Disposition');

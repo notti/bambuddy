@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import settings as app_settings
 from backend.app.core.database import get_db
+from backend.app.models.api_key import APIKey
 from backend.app.models.archive import PrintArchive
 from backend.app.models.external_link import ExternalLink
 from backend.app.models.filament import Filament
@@ -228,6 +229,7 @@ async def export_backup(
     include_projects: bool = Query(False, description="Include projects with BOM items"),
     include_pending_uploads: bool = Query(False, description="Include pending virtual printer uploads"),
     include_access_codes: bool = Query(False, description="Include printer access codes (security risk!)"),
+    include_api_keys: bool = Query(False, description="Include API keys (keys will need to be regenerated on import)"),
 ):
     """Export selected data as JSON backup."""
     backup: dict = {
@@ -527,12 +529,13 @@ async def export_backup(
             )
         backup["included"].append("print_queue")
 
-    # Collect files for ZIP (icons + archives)
+    # Collect files for ZIP (icons + archives + project attachments)
     backup_files: list[tuple[str, Path]] = []  # (zip_path, local_path)
+    base_dir = app_settings.base_dir
 
     # Add external link icon files
     if include_external_links and "external_links" in backup:
-        icons_dir = app_settings.base_dir / "icons"
+        icons_dir = base_dir / "icons"
         for link_data in backup["external_links"]:
             if "custom_icon_path" in link_data:
                 icon_path = icons_dir / link_data["custom_icon"]
@@ -544,7 +547,6 @@ async def export_backup(
         result = await db.execute(select(PrintArchive))
         archives = result.scalars().all()
         backup["archives"] = []
-        base_dir = app_settings.base_dir
 
         # Build project ID to name mapping for archive export
         project_id_to_name: dict[int, str] = {}
@@ -712,6 +714,39 @@ async def export_backup(
 
             backup["pending_uploads"].append(upload_data)
         backup["included"].append("pending_uploads")
+
+    # API keys (note: key_hash cannot be restored, new keys must be generated)
+    if include_api_keys:
+        # Build printer ID to serial mapping for cross-system compatibility
+        printer_id_to_serial: dict[int, str] = {}
+        pr_result = await db.execute(select(Printer))
+        for pr in pr_result.scalars().all():
+            printer_id_to_serial[pr.id] = pr.serial_number
+
+        result = await db.execute(select(APIKey))
+        api_keys = result.scalars().all()
+        backup["api_keys"] = []
+        for key in api_keys:
+            # Convert printer_ids from list of IDs to list of serials
+            printer_serials = None
+            if key.printer_ids:
+                printer_serials = [
+                    printer_id_to_serial.get(pid) for pid in key.printer_ids if pid in printer_id_to_serial
+                ]
+
+            backup["api_keys"].append(
+                {
+                    "name": key.name,
+                    "key_prefix": key.key_prefix,  # For identification only
+                    "can_queue": key.can_queue,
+                    "can_control_printer": key.can_control_printer,
+                    "can_read_status": key.can_read_status,
+                    "printer_serials": printer_serials,  # Use serials instead of IDs
+                    "enabled": key.enabled,
+                    "expires_at": key.expires_at.isoformat() if key.expires_at else None,
+                }
+            )
+        backup["included"].append("api_keys")
 
     # If there are files to include (icons or archives), create ZIP file
     if backup_files:
@@ -1598,6 +1633,78 @@ async def import_backup(
                 db.add(pending)
                 restored["pending_uploads"] += 1
 
+    # Restore API keys (generates new keys since we can't restore the hash)
+    new_api_keys: list[dict] = []  # Track newly generated keys for response
+    if "api_keys" in backup:
+        from backend.app.core.auth import generate_api_key
+
+        # Build printer serial to ID mapping
+        printer_serial_to_id: dict[str, int] = {}
+        pr_result = await db.execute(select(Printer))
+        for pr in pr_result.scalars().all():
+            printer_serial_to_id[pr.serial_number] = pr.id
+
+        restored["api_keys"] = 0
+        skipped["api_keys"] = 0
+        skipped_details["api_keys"] = []
+
+        for key_data in backup["api_keys"]:
+            # Check if key with same name already exists
+            result = await db.execute(select(APIKey).where(APIKey.name == key_data["name"]))
+            existing = result.scalar_one_or_none()
+            if existing:
+                if overwrite:
+                    # Update permissions but keep the existing key
+                    existing.can_queue = key_data.get("can_queue", True)
+                    existing.can_control_printer = key_data.get("can_control_printer", False)
+                    existing.can_read_status = key_data.get("can_read_status", True)
+                    existing.enabled = key_data.get("enabled", True)
+                    if key_data.get("expires_at"):
+                        existing.expires_at = datetime.fromisoformat(key_data["expires_at"])
+                    # Convert printer serials to IDs
+                    if key_data.get("printer_serials"):
+                        existing.printer_ids = [
+                            printer_serial_to_id[s] for s in key_data["printer_serials"] if s in printer_serial_to_id
+                        ]
+                    restored["api_keys"] += 1
+                else:
+                    skipped["api_keys"] += 1
+                    skipped_details["api_keys"].append(key_data["name"])
+            else:
+                # Generate new key
+                full_key, key_hash, key_prefix = generate_api_key()
+
+                # Convert printer serials to IDs
+                printer_ids = None
+                if key_data.get("printer_serials"):
+                    printer_ids = [
+                        printer_serial_to_id[s] for s in key_data["printer_serials"] if s in printer_serial_to_id
+                    ]
+
+                api_key = APIKey(
+                    name=key_data["name"],
+                    key_hash=key_hash,
+                    key_prefix=key_prefix,
+                    can_queue=key_data.get("can_queue", True),
+                    can_control_printer=key_data.get("can_control_printer", False),
+                    can_read_status=key_data.get("can_read_status", True),
+                    printer_ids=printer_ids,
+                    enabled=key_data.get("enabled", True),
+                )
+                if key_data.get("expires_at"):
+                    api_key.expires_at = datetime.fromisoformat(key_data["expires_at"])
+                db.add(api_key)
+                restored["api_keys"] += 1
+
+                # Track the new key so user can see it
+                new_api_keys.append(
+                    {
+                        "name": key_data["name"],
+                        "key": full_key,
+                        "key_prefix": key_prefix,
+                    }
+                )
+
     await db.commit()
 
     # If printers were in the backup (restored, updated, or skipped), reconnect all active printers
@@ -1694,7 +1801,7 @@ async def import_backup(
     if skipped_parts:
         message_parts.append(f"Skipped (already exist): {', '.join(skipped_parts)}")
 
-    return {
+    response = {
         "success": True,
         "message": ". ".join(message_parts) if message_parts else "Nothing to restore",
         "restored": restored,
@@ -1703,6 +1810,12 @@ async def import_backup(
         "files_restored": files_restored,
         "total_skipped": total_skipped,
     }
+
+    # Include newly generated API keys if any (so user can see them)
+    if new_api_keys:
+        response["new_api_keys"] = new_api_keys
+
+    return response
 
 
 # =============================================================================

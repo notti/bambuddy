@@ -2435,7 +2435,18 @@ export function SettingsPage() {
             // Reset local settings to force re-sync from restored data
             setLocalSettings(null);
             isInitialLoadRef.current = true;
-            queryClient.invalidateQueries();
+            // Use resetQueries to clear cached data completely
+            // This ensures fresh data is fetched, not stale cache
+            queryClient.resetQueries({ queryKey: ['settings'] });
+            // Invalidate other queries that may have changed
+            queryClient.invalidateQueries({ queryKey: ['notification-providers'] });
+            queryClient.invalidateQueries({ queryKey: ['notification-templates'] });
+            queryClient.invalidateQueries({ queryKey: ['smart-plugs'] });
+            queryClient.invalidateQueries({ queryKey: ['external-links'] });
+            queryClient.invalidateQueries({ queryKey: ['printers'] });
+            queryClient.invalidateQueries({ queryKey: ['filaments'] });
+            queryClient.invalidateQueries({ queryKey: ['maintenance-types'] });
+            queryClient.invalidateQueries({ queryKey: ['api-keys'] });
           }}
         />
       )}
