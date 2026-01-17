@@ -30,7 +30,7 @@ from backend.app.services.bambu_ftp import (
     get_storage_info_async,
     list_files_async,
 )
-from backend.app.services.printer_manager import get_derived_status_name, printer_manager
+from backend.app.services.printer_manager import get_derived_status_name, printer_manager, supports_chamber_temp
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/printers", tags=["printers"])
@@ -338,6 +338,14 @@ async def get_printer_status(printer_id: int, db: AsyncSession = Depends(get_db)
     tray_now = state.tray_now
     logger.debug(f"Using tray_now directly as global ID: {tray_now}")
 
+    # Filter out chamber temp for models that don't have a real sensor
+    # P1P, P1S, A1, A1Mini report meaningless chamber_temper values
+    temperatures = state.temperatures
+    if not supports_chamber_temp(printer.model):
+        temperatures = {
+            k: v for k, v in temperatures.items() if k not in ("chamber", "chamber_target", "chamber_heating")
+        }
+
     return PrinterStatus(
         id=printer_id,
         name=printer.name,
@@ -350,7 +358,7 @@ async def get_printer_status(printer_id: int, db: AsyncSession = Depends(get_db)
         remaining_time=state.remaining_time,
         layer_num=state.layer_num,
         total_layers=state.total_layers,
-        temperatures=state.temperatures,
+        temperatures=temperatures,
         cover_url=cover_url,
         hms_errors=hms_errors,
         ams=ams_units,

@@ -2,6 +2,15 @@
 
 All notable changes to Bambuddy will be documented in this file.
 
+## [0.1.6b14] - 2026-01-17
+
+### Fixed
+- **Chamber temp showing on printers without sensor in multi-printer setups** - Fixed regression where A1/P1S chamber temperature would appear after adding a second printer:
+  - Root cause: REST API `/printers/{id}/status` endpoint wasn't filtering chamber temp by model
+  - WebSocket broadcasts filtered correctly, but initial REST fetch didn't
+  - Now both REST and WebSocket consistently filter chamber temp for P1P/P1S/A1/A1Mini
+  - Fixes [#82](https://github.com/maziggy/bambuddy/issues/82) (multi-printer regression)
+
 ## [0.1.6b13] - 2026-01-16
 
 ### Fixed
