@@ -30,7 +30,7 @@ from backend.app.services.bambu_ftp import (
     get_storage_info_async,
     list_files_async,
 )
-from backend.app.services.printer_manager import get_derived_status_name, printer_manager
+from backend.app.services.printer_manager import get_derived_status_name, printer_manager, supports_chamber_temp
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/printers", tags=["printers"])
@@ -338,6 +338,14 @@ async def get_printer_status(printer_id: int, db: AsyncSession = Depends(get_db)
     tray_now = state.tray_now
     logger.debug(f"Using tray_now directly as global ID: {tray_now}")
 
+    # Filter out chamber temp for models that don't have a real sensor
+    # P1P, P1S, A1, A1Mini report meaningless chamber_temper values
+    temperatures = state.temperatures
+    if not supports_chamber_temp(printer.model):
+        temperatures = {
+            k: v for k, v in temperatures.items() if k not in ("chamber", "chamber_target", "chamber_heating")
+        }
+
     return PrinterStatus(
         id=printer_id,
         name=printer.name,
@@ -350,7 +358,7 @@ async def get_printer_status(printer_id: int, db: AsyncSession = Depends(get_db)
         remaining_time=state.remaining_time,
         layer_num=state.layer_num,
         total_layers=state.total_layers,
-        temperatures=state.temperatures,
+        temperatures=temperatures,
         cover_url=cover_url,
         hms_errors=hms_errors,
         ams=ams_units,
@@ -488,24 +496,37 @@ async def get_printer_cover(
         if cache_key in _cover_cache[printer_id]:
             return Response(content=_cover_cache[printer_id][cache_key], media_type="image/png")
 
-    # Build 3MF filename from subtask_name
-    # Bambu printers store files as "name.gcode.3mf"
-    filename = subtask_name
-    if not filename.endswith(".3mf"):
-        filename = filename + ".gcode.3mf"
+    # Build possible 3MF filenames from subtask_name
+    # Bambu printers may store files as "name.gcode.3mf" (sliced via Bambu Studio)
+    # or just "name.3mf" (uploaded directly)
+    possible_filenames = []
+    if subtask_name.endswith(".3mf"):
+        possible_filenames.append(subtask_name)
+    else:
+        # Try both naming patterns
+        possible_filenames.append(f"{subtask_name}.gcode.3mf")
+        possible_filenames.append(f"{subtask_name}.3mf")
 
-    # Try to download the 3MF file from printer
-    temp_path = settings.archive_dir / "temp" / f"cover_{printer_id}_{filename}"
+    # Build list of all remote paths to try
+    remote_paths = []
+    for filename in possible_filenames:
+        remote_paths.extend(
+            [
+                f"/{filename}",  # Root directory (most common)
+                f"/cache/{filename}",
+                f"/model/{filename}",
+                f"/data/{filename}",
+            ]
+        )
+
+    # Use first filename for temp path (will be reused)
+    temp_filename = possible_filenames[0]
+    temp_path = settings.archive_dir / "temp" / f"cover_{printer_id}_{temp_filename}"
     temp_path.parent.mkdir(parents=True, exist_ok=True)
 
-    remote_paths = [
-        f"/{filename}",  # Root directory (most common)
-        f"/cache/{filename}",
-        f"/model/{filename}",
-        f"/data/{filename}",
-    ]
-
-    logger.info(f"Trying to download cover for '{filename}' from {printer.ip_address}")
+    logger.info(
+        f"Trying to download cover for '{subtask_name}' from {printer.ip_address} (trying {len(remote_paths)} paths)"
+    )
 
     # Retry logic for transient FTP failures
     max_retries = 2
@@ -535,7 +556,8 @@ async def get_printer_cover(
 
     if not downloaded:
         raise HTTPException(
-            404, f"Could not download 3MF file '{filename}' from printer {printer.ip_address}. Tried: {remote_paths}"
+            404,
+            f"Could not download 3MF file for '{subtask_name}' from printer {printer.ip_address}. Tried: {possible_filenames}",
         )
 
     # Verify file actually exists and has content
@@ -547,7 +569,7 @@ async def get_printer_cover(
 
     if file_size == 0:
         temp_path.unlink()
-        raise HTTPException(500, f"Downloaded file is empty: {filename}")
+        raise HTTPException(500, f"Downloaded file is empty for '{subtask_name}'")
 
     try:
         # Extract thumbnail from 3MF (which is a ZIP file)
@@ -1207,16 +1229,22 @@ async def get_printable_objects(
             from backend.app.services.archive import extract_printable_objects_from_3mf
             from backend.app.services.bambu_ftp import download_file_try_paths_async
 
-            # Build 3MF filename
-            filename = subtask_name
-            if not filename.endswith(".3mf"):
-                filename = filename + ".gcode.3mf"
+            # Build possible 3MF filenames (try both .gcode.3mf and .3mf)
+            possible_filenames = []
+            if subtask_name.endswith(".3mf"):
+                possible_filenames.append(subtask_name)
+            else:
+                possible_filenames.append(f"{subtask_name}.gcode.3mf")
+                possible_filenames.append(f"{subtask_name}.3mf")
 
             # Download 3MF from printer
-            temp_path = settings.archive_dir / "temp" / f"objects_{printer_id}_{filename}"
+            temp_path = settings.archive_dir / "temp" / f"objects_{printer_id}_{possible_filenames[0]}"
             temp_path.parent.mkdir(parents=True, exist_ok=True)
 
-            remote_paths = [f"/{filename}", f"/cache/{filename}", f"/model/{filename}"]
+            # Build list of all remote paths to try
+            remote_paths = []
+            for filename in possible_filenames:
+                remote_paths.extend([f"/{filename}", f"/cache/{filename}", f"/model/{filename}"])
 
             try:
                 downloaded = await download_file_try_paths_async(

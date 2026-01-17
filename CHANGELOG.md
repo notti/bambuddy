@@ -2,6 +2,92 @@
 
 All notable changes to Bambuddy will be documented in this file.
 
+## [0.1.6b15] - 2026-01-17
+
+### Added
+- **Virtual Printer "Queue" mode** - New mode that archives files and adds them to the print queue:
+  - Three modes now available: Archive (immediate), Review (pending list), Queue (print queue)
+  - Queue mode creates unassigned queue items that can be assigned to a printer later
+  - Renamed old "Queue for Review" to "Review" to avoid confusion with print queue
+- **Unassigned queue items** - Print queue now supports items without an assigned printer:
+  - Queue items can be created without a printer (printer_id nullable)
+  - Queue page shows "Unassigned" filter option and highlights unassigned items in orange
+  - Edit modal allows assigning a printer to unassigned items
+  - Useful for virtual printer uploads where target printer is decided later
+- **Sidebar badge indicators** - Visual indicators on sidebar icons for pending items:
+  - Queue icon shows yellow badge with count of pending queue items
+  - Archive icon shows blue badge with count of pending uploads (virtual printer review items)
+  - Badges auto-update every 5 seconds and on window focus
+
+### Changed
+- Virtual printer mode labels: "Immediate" → "Archive", "Queue for Review" → "Review"
+- Queue page printer filter now includes "Unassigned" option
+
+## [0.1.6b14] - 2026-01-17
+
+### Fixed
+- **Chamber temp showing on printers without sensor in multi-printer setups** - Fixed regression where A1/P1S chamber temperature would appear after adding a second printer:
+  - Root cause: REST API `/printers/{id}/status` endpoint wasn't filtering chamber temp by model
+  - WebSocket broadcasts filtered correctly, but initial REST fetch didn't
+  - Now both REST and WebSocket consistently filter chamber temp for P1P/P1S/A1/A1Mini
+  - Fixes [#82](https://github.com/maziggy/bambuddy/issues/82) (multi-printer regression)
+
+## [0.1.6b13] - 2026-01-16
+
+### Fixed
+- **Queue prints failing on A1 printers** - Fixed "MicroSD Card read/write exception error" when starting prints from queue:
+  - Root cause: Queue uploaded files to `/cache/` but print command referenced root `/`
+  - Queue now uploads to root directory like archive reprint does
+  - Added filename cleaning (handles `.gcode.3mf` double extensions)
+  - Added pre-delete of existing files to avoid FTP 553 errors
+  - Fixes [#86](https://github.com/maziggy/bambuddy/issues/86)
+
+## [0.1.6b12] - 2026-01-16
+
+### Added
+- **Project parts tracking** - Track individual parts/objects separately from print plates:
+  - New "Target Parts" field in project create/edit modal alongside "Target Plates"
+  - Separate progress bars for plates (print jobs) vs parts (objects printed)
+  - Parts count auto-detected from 3MF files when archiving prints
+  - Project cards show both plates and parts counts in footer stats
+  - Example: Voron build with 25 plates producing 150 parts total
+  - Closes [#85](https://github.com/maziggy/bambuddy/issues/85)
+- **Archive quantity auto-detection** - Automatically set parts count when archiving:
+  - Extracts printable object count from 3MF `slice_info.config`
+  - Respects skipped objects (not counted)
+  - Falls back to 1 if extraction fails
+- **Migration script for existing archives** - Update quantities on existing archives:
+  - Run `python scripts/update_archive_quantities.py` to update existing archives
+  - Use `--dry-run` flag to preview changes without applying them
+  - Parses 3MF files to extract correct object counts
+
+### Changed
+- Project stats now correctly distinguish between plates (archive count) and parts (sum of quantities)
+- Project list `completed_count` now represents parts printed, not print jobs
+- Progress calculations: plates use `archive_count/target_count`, parts use `completed_count/target_parts_count`
+
+## [0.1.6b11] - 2026-01-13
+
+### Added
+- **MQTT Publishing** - Publish BamBuddy events to external MQTT brokers for integration with Home Assistant, Node-RED, and other automation platforms:
+  - New "Network" tab in Settings (between Filament and API Keys)
+  - Configure broker hostname, port, username/password, TLS, and topic prefix
+  - Auto-populate port when toggling TLS (1883 ↔ 8883)
+  - Real-time connection status indicator in tab and settings card
+  - Published topics include:
+    - `bambuddy/status` - Online/offline status
+    - `bambuddy/printers/{serial}/status` - Real-time printer state (throttled to 1/sec)
+    - `bambuddy/printers/{serial}/print/started|completed|failed` - Print lifecycle events
+    - `bambuddy/printers/{serial}/ams/changed` - AMS filament changes
+    - `bambuddy/queue/job_added|job_started|job_completed` - Print queue events
+    - `bambuddy/maintenance/alert|reset` - Maintenance notifications
+    - `bambuddy/smart_plugs/on|off|energy` - Smart plug state changes
+    - `bambuddy/archive/created|updated` - Archive events
+  - Supports TLS/SSL encryption with self-signed certificates
+  - Auto-reconnect when settings change
+  - Settings included in backup/restore
+- **FTP Retry moved to Network tab** - FTP retry settings relocated from General to Network tab for better organization
+
 ## [0.1.6b10] - 2026-01-11
 
 ### Added

@@ -12,6 +12,7 @@ interface RestoreResult {
   skipped_details?: Record<string, string[]>;
   files_restored?: number;
   total_skipped?: number;
+  new_api_keys?: Array<{ name: string; key: string; key_prefix: string }>;
 }
 
 interface RestoreModalProps {
@@ -34,6 +35,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   projects: 'Projects',
   pending_uploads: 'Pending Uploads',
   external_links: 'External Links',
+  api_keys: 'API Keys',
 };
 
 export function RestoreModal({ onClose, onRestore, onSuccess }: RestoreModalProps) {
@@ -46,11 +48,17 @@ export function RestoreModal({ onClose, onRestore, onSuccess }: RestoreModalProp
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && state !== 'restoring') onClose();
+      if (e.key === 'Escape' && state !== 'restoring') {
+        // Use handleClose for result state to trigger onSuccess
+        if (state === 'result' && result?.success) {
+          onSuccess();
+        }
+        onClose();
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, state]);
+  }, [onClose, onSuccess, state, result]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -67,9 +75,8 @@ export function RestoreModal({ onClose, onRestore, onSuccess }: RestoreModalProp
       const restoreResult = await onRestore(selectedFile, overwrite);
       setResult(restoreResult);
       setState('result');
-      if (restoreResult.success) {
-        onSuccess();
-      }
+      // Don't call onSuccess here - wait until modal closes
+      // This prevents race condition with query cache
     } catch {
       setResult({
         success: false,
@@ -77,6 +84,14 @@ export function RestoreModal({ onClose, onRestore, onSuccess }: RestoreModalProp
       });
       setState('result');
     }
+  };
+
+  const handleClose = () => {
+    // If restore was successful, trigger refresh before closing
+    if (result?.success) {
+      onSuccess();
+    }
+    onClose();
   };
 
   const toggleCategory = (category: string) => {
@@ -141,7 +156,7 @@ export function RestoreModal({ onClose, onRestore, onSuccess }: RestoreModalProp
             </div>
             {state !== 'restoring' && (
               <button
-                onClick={onClose}
+                onClick={handleClose}
                 className="p-2 hover:bg-bambu-dark-tertiary rounded-lg transition-colors"
               >
                 <X className="w-5 h-5" />
@@ -352,6 +367,39 @@ export function RestoreModal({ onClose, onRestore, onSuccess }: RestoreModalProp
                   </div>
                 )}
 
+                {/* Newly Generated API Keys */}
+                {result.new_api_keys && result.new_api_keys.length > 0 && (
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-medium text-bambu-gray flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-orange-500" />
+                      New API Keys Generated
+                    </h4>
+                    <div className="p-3 rounded bg-orange-500/10 border border-orange-500/30">
+                      <p className="text-xs text-orange-200 mb-2">
+                        These keys are only shown once. Copy them now!
+                      </p>
+                      <div className="space-y-2">
+                        {result.new_api_keys.map((apiKey: { name: string; key: string; key_prefix: string }, i: number) => (
+                          <div key={i} className="p-2 rounded bg-bambu-dark">
+                            <div className="text-sm text-white font-medium mb-1">{apiKey.name}</div>
+                            <div className="flex items-center gap-2">
+                              <code className="text-xs text-bambu-green bg-bambu-dark-tertiary px-2 py-1 rounded font-mono flex-1 break-all">
+                                {apiKey.key}
+                              </code>
+                              <button
+                                onClick={() => navigator.clipboard.writeText(apiKey.key)}
+                                className="text-xs text-bambu-gray hover:text-white px-2 py-1 rounded bg-bambu-dark-tertiary"
+                              >
+                                Copy
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {totalRestored === 0 && totalSkipped === 0 && (
                   <div className="p-4 text-center text-bambu-gray">
                     No data was found to restore in the backup file.
@@ -361,7 +409,7 @@ export function RestoreModal({ onClose, onRestore, onSuccess }: RestoreModalProp
 
               {/* Footer */}
               <div className="flex items-center justify-end gap-3 p-4 border-t border-bambu-dark-tertiary">
-                <Button onClick={onClose}>
+                <Button onClick={handleClose}>
                   Close
                 </Button>
               </div>

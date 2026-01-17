@@ -341,17 +341,19 @@ export interface SimilarArchive {
 export interface ProjectStats {
   total_archives: number;
   total_items: number;  // Sum of quantities (total items printed)
-  completed_prints: number;
+  completed_prints: number;  // Sum of quantities for completed prints (parts)
   failed_prints: number;
   queued_prints: number;
   in_progress_prints: number;
   total_print_time_hours: number;
   total_filament_grams: number;
-  progress_percent: number | null;
+  progress_percent: number | null;  // Plates progress (total_archives / target_count)
+  parts_progress_percent: number | null;  // Parts progress (completed_prints / target_parts_count)
   estimated_cost: number;
   total_energy_kwh: number;
   total_energy_cost: number;
-  remaining_prints: number | null;
+  remaining_prints: number | null;  // Remaining plates
+  remaining_parts: number | null;  // Remaining parts
   bom_total_items: number;
   bom_completed_items: number;
 }
@@ -370,7 +372,8 @@ export interface Project {
   description: string | null;
   color: string | null;
   status: string;  // active, completed, archived
-  target_count: number | null;
+  target_count: number | null;  // Target number of plates/print jobs
+  target_parts_count: number | null;  // Target number of parts/objects
   notes: string | null;
   attachments: ProjectAttachment[] | null;
   tags: string | null;
@@ -409,12 +412,15 @@ export interface ProjectListItem {
   description: string | null;
   color: string | null;
   status: string;
-  target_count: number | null;
+  target_count: number | null;  // Target number of plates/print jobs
+  target_parts_count: number | null;  // Target number of parts/objects
   created_at: string;
-  archive_count: number;  // Number of print jobs
-  total_items: number;  // Sum of quantities (total items printed)
+  archive_count: number;  // Number of print jobs (plates)
+  total_items: number;  // Sum of quantities (total items printed, including failed)
+  completed_count: number;  // Sum of quantities for completed prints only (parts)
+  failed_count: number;  // Sum of quantities for failed prints
   queue_count: number;
-  progress_percent: number | null;
+  progress_percent: number | null;  // Plates progress
   archives: ArchivePreview[];
 }
 
@@ -423,6 +429,7 @@ export interface ProjectCreate {
   description?: string;
   color?: string;
   target_count?: number;
+  target_parts_count?: number;
   notes?: string;
   tags?: string;
   due_date?: string;
@@ -437,6 +444,7 @@ export interface ProjectUpdate {
   color?: string;
   status?: string;
   target_count?: number;
+  target_parts_count?: number;
   notes?: string;
   tags?: string;
   due_date?: string;
@@ -569,9 +577,26 @@ export interface AppSettings {
   ftp_retry_count: number;
   ftp_retry_delay: number;
   ftp_timeout: number;
+  // MQTT relay settings
+  mqtt_enabled: boolean;
+  mqtt_broker: string;
+  mqtt_port: number;
+  mqtt_username: string;
+  mqtt_password: string;
+  mqtt_topic_prefix: string;
+  mqtt_use_tls: boolean;
 }
 
 export type AppSettingsUpdate = Partial<AppSettings>;
+
+// MQTT relay status
+export interface MQTTStatus {
+  enabled: boolean;
+  connected: boolean;
+  broker: string;
+  port: number;
+  topic_prefix: string;
+}
 
 // Cloud types
 export interface CloudAuthStatus {
@@ -789,7 +814,7 @@ export interface DiscoveredTasmotaDevice {
 // Print Queue types
 export interface PrintQueueItem {
   id: number;
-  printer_id: number;
+  printer_id: number | null;  // null = unassigned
   archive_id: number;
   position: number;
   scheduled_time: string | null;
@@ -809,7 +834,7 @@ export interface PrintQueueItem {
 }
 
 export interface PrintQueueItemCreate {
-  printer_id: number;
+  printer_id?: number | null;  // null = unassigned
   archive_id: number;
   scheduled_time?: string | null;
   require_previous_success?: boolean;
@@ -819,7 +844,7 @@ export interface PrintQueueItemCreate {
 }
 
 export interface PrintQueueItemUpdate {
-  printer_id?: number;
+  printer_id?: number | null;  // null = unassign
   position?: number;
   scheduled_time?: string | null;
   require_previous_success?: boolean;
@@ -1783,6 +1808,7 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
+  getMQTTStatus: () => request<MQTTStatus>('/settings/mqtt/status'),
   resetSettings: () =>
     request<AppSettings>('/settings/reset', { method: 'POST' }),
   exportBackup: async (categories?: Record<string, boolean>): Promise<{ blob: Blob; filename: string }> => {
@@ -1798,10 +1824,18 @@ export const api = {
       if (categories.maintenance !== undefined) params.set('include_maintenance', String(categories.maintenance));
       if (categories.archives !== undefined) params.set('include_archives', String(categories.archives));
       if (categories.projects !== undefined) params.set('include_projects', String(categories.projects));
+      if (categories.pending_uploads !== undefined) params.set('include_pending_uploads', String(categories.pending_uploads));
       if (categories.access_codes !== undefined) params.set('include_access_codes', String(categories.access_codes));
+      if (categories.api_keys !== undefined) params.set('include_api_keys', String(categories.api_keys));
     }
     const url = `${API_BASE}/settings/backup${params.toString() ? '?' + params.toString() : ''}`;
     const response = await fetch(url);
+
+    // Check for errors
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText || `Backup failed with status ${response.status}`);
+    }
 
     // Get filename from Content-Disposition header
     const contentDisposition = response.headers.get('Content-Disposition');
@@ -2482,7 +2516,7 @@ export const discoveryApi = {
 export interface VirtualPrinterStatus {
   enabled: boolean;
   running: boolean;
-  mode: 'immediate' | 'queue';
+  mode: 'immediate' | 'queue' | 'review' | 'print_queue';  // 'queue' is legacy, normalized to 'review'
   name: string;
   serial: string;
   model: string;
@@ -2493,7 +2527,7 @@ export interface VirtualPrinterStatus {
 export interface VirtualPrinterSettings {
   enabled: boolean;
   access_code_set: boolean;
-  mode: 'immediate' | 'queue';
+  mode: 'immediate' | 'queue' | 'review' | 'print_queue';  // 'queue' is legacy, normalized to 'review'
   model: string;
   status: VirtualPrinterStatus;
 }
@@ -2524,7 +2558,7 @@ export const virtualPrinterApi = {
   updateSettings: (data: {
     enabled?: boolean;
     access_code?: string;
-    mode?: 'immediate' | 'queue';
+    mode?: 'immediate' | 'review' | 'print_queue';
     model?: string;
   }) => {
     const params = new URLSearchParams();

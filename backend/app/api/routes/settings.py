@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import settings as app_settings
 from backend.app.core.database import get_db
+from backend.app.models.api_key import APIKey
 from backend.app.models.archive import PrintArchive
 from backend.app.models.external_link import ExternalLink
 from backend.app.models.filament import Filament
@@ -73,6 +74,8 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
                 "telemetry_enabled",
                 "virtual_printer_enabled",
                 "ftp_retry_enabled",
+                "mqtt_enabled",
+                "mqtt_use_tls",
             ]:
                 settings_dict[setting.key] = setting.value.lower() == "true"
             elif setting.key in ["default_filament_cost", "energy_cost_per_kwh", "ams_temp_good", "ams_temp_fair"]:
@@ -83,6 +86,7 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
                 "ams_history_retention_days",
                 "ftp_retry_count",
                 "ftp_retry_delay",
+                "mqtt_port",
             ]:
                 settings_dict[setting.key] = int(setting.value)
             elif setting.key == "default_printer_id":
@@ -102,6 +106,18 @@ async def update_settings(
     """Update application settings."""
     update_data = settings_update.model_dump(exclude_unset=True)
 
+    # Check if any MQTT settings are being updated
+    mqtt_keys = {
+        "mqtt_enabled",
+        "mqtt_broker",
+        "mqtt_port",
+        "mqtt_username",
+        "mqtt_password",
+        "mqtt_topic_prefix",
+        "mqtt_use_tls",
+    }
+    mqtt_updated = bool(mqtt_keys & set(update_data.keys()))
+
     for key, value in update_data.items():
         # Convert value to string for storage
         if isinstance(value, bool):
@@ -113,6 +129,24 @@ async def update_settings(
         await set_setting(db, key, str_value)
 
     await db.commit()
+
+    # Reconfigure MQTT relay if any MQTT settings changed
+    if mqtt_updated:
+        try:
+            from backend.app.services.mqtt_relay import mqtt_relay
+
+            mqtt_settings = {
+                "mqtt_enabled": (await get_setting(db, "mqtt_enabled") or "false") == "true",
+                "mqtt_broker": await get_setting(db, "mqtt_broker") or "",
+                "mqtt_port": int(await get_setting(db, "mqtt_port") or "1883"),
+                "mqtt_username": await get_setting(db, "mqtt_username") or "",
+                "mqtt_password": await get_setting(db, "mqtt_password") or "",
+                "mqtt_topic_prefix": await get_setting(db, "mqtt_topic_prefix") or "bambuddy",
+                "mqtt_use_tls": (await get_setting(db, "mqtt_use_tls") or "false") == "true",
+            }
+            await mqtt_relay.configure(mqtt_settings)
+        except Exception:
+            pass  # Don't fail the settings update if MQTT reconfiguration fails
 
     # Return updated settings
     return await get_settings(db)
@@ -195,6 +229,7 @@ async def export_backup(
     include_projects: bool = Query(False, description="Include projects with BOM items"),
     include_pending_uploads: bool = Query(False, description="Include pending virtual printer uploads"),
     include_access_codes: bool = Query(False, description="Include printer access codes (security risk!)"),
+    include_api_keys: bool = Query(False, description="Include API keys (keys will need to be regenerated on import)"),
 ):
     """Export selected data as JSON backup."""
     backup: dict = {
@@ -478,7 +513,7 @@ async def export_backup(
         for qi in queue_items:
             backup["print_queue"].append(
                 {
-                    "printer_serial": printer_id_to_serial.get(qi.printer_id),
+                    "printer_serial": printer_id_to_serial.get(qi.printer_id) if qi.printer_id else None,
                     "archive_hash": archive_id_to_hash.get(qi.archive_id),
                     "project_name": project_id_to_name.get(qi.project_id) if qi.project_id else None,
                     "position": qi.position,
@@ -486,6 +521,7 @@ async def export_backup(
                     "require_previous_success": qi.require_previous_success,
                     "auto_off_after": qi.auto_off_after,
                     "manual_start": qi.manual_start,
+                    "ams_mapping": qi.ams_mapping,
                     "status": qi.status,
                     "started_at": qi.started_at.isoformat() if qi.started_at else None,
                     "completed_at": qi.completed_at.isoformat() if qi.completed_at else None,
@@ -494,12 +530,13 @@ async def export_backup(
             )
         backup["included"].append("print_queue")
 
-    # Collect files for ZIP (icons + archives)
+    # Collect files for ZIP (icons + archives + project attachments)
     backup_files: list[tuple[str, Path]] = []  # (zip_path, local_path)
+    base_dir = app_settings.base_dir
 
     # Add external link icon files
     if include_external_links and "external_links" in backup:
-        icons_dir = app_settings.base_dir / "icons"
+        icons_dir = base_dir / "icons"
         for link_data in backup["external_links"]:
             if "custom_icon_path" in link_data:
                 icon_path = icons_dir / link_data["custom_icon"]
@@ -511,7 +548,6 @@ async def export_backup(
         result = await db.execute(select(PrintArchive))
         archives = result.scalars().all()
         backup["archives"] = []
-        base_dir = app_settings.base_dir
 
         # Build project ID to name mapping for archive export
         project_id_to_name: dict[int, str] = {}
@@ -679,6 +715,39 @@ async def export_backup(
 
             backup["pending_uploads"].append(upload_data)
         backup["included"].append("pending_uploads")
+
+    # API keys (note: key_hash cannot be restored, new keys must be generated)
+    if include_api_keys:
+        # Build printer ID to serial mapping for cross-system compatibility
+        printer_id_to_serial: dict[int, str] = {}
+        pr_result = await db.execute(select(Printer))
+        for pr in pr_result.scalars().all():
+            printer_id_to_serial[pr.id] = pr.serial_number
+
+        result = await db.execute(select(APIKey))
+        api_keys = result.scalars().all()
+        backup["api_keys"] = []
+        for key in api_keys:
+            # Convert printer_ids from list of IDs to list of serials
+            printer_serials = None
+            if key.printer_ids:
+                printer_serials = [
+                    printer_id_to_serial.get(pid) for pid in key.printer_ids if pid in printer_id_to_serial
+                ]
+
+            backup["api_keys"].append(
+                {
+                    "name": key.name,
+                    "key_prefix": key.key_prefix,  # For identification only
+                    "can_queue": key.can_queue,
+                    "can_control_printer": key.can_control_printer,
+                    "can_read_status": key.can_read_status,
+                    "printer_serials": printer_serials,  # Use serials instead of IDs
+                    "enabled": key.enabled,
+                    "expires_at": key.expires_at.isoformat() if key.expires_at else None,
+                }
+            )
+        backup["included"].append("api_keys")
 
     # If there are files to include (icons or archives), create ZIP file
     if backup_files:
@@ -1451,32 +1520,44 @@ async def import_backup(
         skipped_details["print_queue"] = []
 
         for qi_data in backup["print_queue"]:
-            printer_serial = qi_data.get("printer_serial")
+            printer_serial = qi_data.get("printer_serial")  # Can be None for unassigned items
             archive_hash = qi_data.get("archive_hash")
 
-            if not printer_serial or not archive_hash:
+            # Archive is required, but printer can be None (unassigned)
+            if not archive_hash:
                 skipped["print_queue"] += 1
                 continue
 
-            printer_id = printer_serial_to_id.get(printer_serial)
+            # Look up printer_id (None if unassigned or printer not found)
+            printer_id = printer_serial_to_id.get(printer_serial) if printer_serial else None
             archive_id = archive_hash_to_id.get(archive_hash)
 
-            if not printer_id or not archive_id:
+            # Archive must exist, but printer is optional (unassigned items)
+            if not archive_id:
                 skipped["print_queue"] += 1
-                skipped_details["print_queue"].append(f"{printer_serial}/{archive_hash[:8] if archive_hash else 'N/A'}")
+                skipped_details["print_queue"].append(
+                    f"{printer_serial or 'unassigned'}/{archive_hash[:8] if archive_hash else 'N/A'}"
+                )
+                continue
+
+            # If printer_serial was specified but printer not found, skip
+            if printer_serial and not printer_id:
+                skipped["print_queue"] += 1
+                skipped_details["print_queue"].append(f"{printer_serial}/{archive_hash[:8]}")
                 continue
 
             project_name = qi_data.get("project_name")
             project_id = project_name_to_id.get(project_name) if project_name else None
 
             qi = PrintQueueItem(
-                printer_id=printer_id,
+                printer_id=printer_id,  # Can be None for unassigned items
                 archive_id=archive_id,
                 project_id=project_id,
                 position=qi_data.get("position", 0),
                 require_previous_success=qi_data.get("require_previous_success", False),
                 auto_off_after=qi_data.get("auto_off_after", False),
                 manual_start=qi_data.get("manual_start", False),
+                ams_mapping=qi_data.get("ams_mapping"),
                 status=qi_data.get("status", "pending"),
                 error_message=qi_data.get("error_message"),
             )
@@ -1565,6 +1646,78 @@ async def import_backup(
                 db.add(pending)
                 restored["pending_uploads"] += 1
 
+    # Restore API keys (generates new keys since we can't restore the hash)
+    new_api_keys: list[dict] = []  # Track newly generated keys for response
+    if "api_keys" in backup:
+        from backend.app.core.auth import generate_api_key
+
+        # Build printer serial to ID mapping
+        printer_serial_to_id: dict[str, int] = {}
+        pr_result = await db.execute(select(Printer))
+        for pr in pr_result.scalars().all():
+            printer_serial_to_id[pr.serial_number] = pr.id
+
+        restored["api_keys"] = 0
+        skipped["api_keys"] = 0
+        skipped_details["api_keys"] = []
+
+        for key_data in backup["api_keys"]:
+            # Check if key with same name already exists
+            result = await db.execute(select(APIKey).where(APIKey.name == key_data["name"]))
+            existing = result.scalar_one_or_none()
+            if existing:
+                if overwrite:
+                    # Update permissions but keep the existing key
+                    existing.can_queue = key_data.get("can_queue", True)
+                    existing.can_control_printer = key_data.get("can_control_printer", False)
+                    existing.can_read_status = key_data.get("can_read_status", True)
+                    existing.enabled = key_data.get("enabled", True)
+                    if key_data.get("expires_at"):
+                        existing.expires_at = datetime.fromisoformat(key_data["expires_at"])
+                    # Convert printer serials to IDs
+                    if key_data.get("printer_serials"):
+                        existing.printer_ids = [
+                            printer_serial_to_id[s] for s in key_data["printer_serials"] if s in printer_serial_to_id
+                        ]
+                    restored["api_keys"] += 1
+                else:
+                    skipped["api_keys"] += 1
+                    skipped_details["api_keys"].append(key_data["name"])
+            else:
+                # Generate new key
+                full_key, key_hash, key_prefix = generate_api_key()
+
+                # Convert printer serials to IDs
+                printer_ids = None
+                if key_data.get("printer_serials"):
+                    printer_ids = [
+                        printer_serial_to_id[s] for s in key_data["printer_serials"] if s in printer_serial_to_id
+                    ]
+
+                api_key = APIKey(
+                    name=key_data["name"],
+                    key_hash=key_hash,
+                    key_prefix=key_prefix,
+                    can_queue=key_data.get("can_queue", True),
+                    can_control_printer=key_data.get("can_control_printer", False),
+                    can_read_status=key_data.get("can_read_status", True),
+                    printer_ids=printer_ids,
+                    enabled=key_data.get("enabled", True),
+                )
+                if key_data.get("expires_at"):
+                    api_key.expires_at = datetime.fromisoformat(key_data["expires_at"])
+                db.add(api_key)
+                restored["api_keys"] += 1
+
+                # Track the new key so user can see it
+                new_api_keys.append(
+                    {
+                        "name": key_data["name"],
+                        "key": full_key,
+                        "key_prefix": key_prefix,
+                    }
+                )
+
     await db.commit()
 
     # If printers were in the backup (restored, updated, or skipped), reconnect all active printers
@@ -1623,6 +1776,23 @@ async def import_backup(
         except Exception:
             pass  # Virtual printer config failed, but don't fail the restore
 
+        # Reconfigure MQTT relay if settings were restored
+        try:
+            from backend.app.services.mqtt_relay import mqtt_relay
+
+            mqtt_settings = {
+                "mqtt_enabled": (await get_setting(db, "mqtt_enabled") or "false") == "true",
+                "mqtt_broker": await get_setting(db, "mqtt_broker") or "",
+                "mqtt_port": int(await get_setting(db, "mqtt_port") or "1883"),
+                "mqtt_username": await get_setting(db, "mqtt_username") or "",
+                "mqtt_password": await get_setting(db, "mqtt_password") or "",
+                "mqtt_topic_prefix": await get_setting(db, "mqtt_topic_prefix") or "bambuddy",
+                "mqtt_use_tls": (await get_setting(db, "mqtt_use_tls") or "false") == "true",
+            }
+            await mqtt_relay.configure(mqtt_settings)
+        except Exception:
+            pass  # MQTT relay config failed, but don't fail the restore
+
     # Build summary message
     restored_parts = []
     for key, count in restored.items():
@@ -1644,7 +1814,7 @@ async def import_backup(
     if skipped_parts:
         message_parts.append(f"Skipped (already exist): {', '.join(skipped_parts)}")
 
-    return {
+    response = {
         "success": True,
         "message": ". ".join(message_parts) if message_parts else "Nothing to restore",
         "restored": restored,
@@ -1653,6 +1823,12 @@ async def import_backup(
         "files_restored": files_restored,
         "total_skipped": total_skipped,
     }
+
+    # Include newly generated API keys if any (so user can see them)
+    if new_api_keys:
+        response["new_api_keys"] = new_api_keys
+
+    return response
 
 
 # =============================================================================
@@ -1724,11 +1900,16 @@ async def update_virtual_printer_settings(
     new_model = model if model is not None else current_model
 
     # Validate mode
-    if new_mode not in ("immediate", "queue"):
+    # "review" is the new name for "queue" (pending review before archiving)
+    # "print_queue" archives and adds to print queue (unassigned)
+    if new_mode not in ("immediate", "queue", "review", "print_queue"):
         return JSONResponse(
             status_code=400,
-            content={"detail": "Mode must be 'immediate' or 'queue'"},
+            content={"detail": "Mode must be 'immediate', 'review', or 'print_queue'"},
         )
+    # Normalize legacy "queue" to "review" for storage
+    if new_mode == "queue":
+        new_mode = "review"
 
     # Validate model
     if model is not None and model not in VIRTUAL_PRINTER_MODELS:
@@ -1780,3 +1961,16 @@ async def update_virtual_printer_settings(
         )
 
     return await get_virtual_printer_settings(db)
+
+
+# =============================================================================
+# MQTT Relay Settings
+# =============================================================================
+
+
+@router.get("/mqtt/status")
+async def get_mqtt_status():
+    """Get MQTT relay connection status."""
+    from backend.app.services.mqtt_relay import mqtt_relay
+
+    return mqtt_relay.get_status()
