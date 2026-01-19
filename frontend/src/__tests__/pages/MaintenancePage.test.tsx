@@ -4,7 +4,6 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { render } from '../utils';
 import { MaintenancePage } from '../../pages/MaintenancePage';
 import { http, HttpResponse } from 'msw';

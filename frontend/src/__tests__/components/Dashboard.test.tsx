@@ -5,8 +5,6 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
-import { render } from '../utils';
 import { http, HttpResponse } from 'msw';
 import { server } from '../mocks/server';
 

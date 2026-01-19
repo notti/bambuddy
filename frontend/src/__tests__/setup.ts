@@ -14,7 +14,7 @@ import '../i18n';
 // Setup MSW server - bypass WebSocket requests so our mock handles them
 beforeAll(() =>
   server.listen({
-    onUnhandledRequest: (request, print) => {
+    onUnhandledRequest: (request, _print) => {
       // Allow WebSocket requests to pass through to our mock
       if (request.url.includes('/ws')) {
         return;

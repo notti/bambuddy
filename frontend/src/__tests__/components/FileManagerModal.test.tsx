@@ -4,15 +4,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
-import { render } from '../utils';
 import { http, HttpResponse } from 'msw';
 import { server } from '../mocks/server';
 
 // Skip these tests as FileManagerModal component structure may differ
 describe.skip('FileManagerModal', () => {
-  const mockOnClose = vi.fn();
-  const mockOnSelect = vi.fn();
+  const _mockOnClose = vi.fn();
+  const _mockOnSelect = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
