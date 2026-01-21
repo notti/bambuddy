@@ -3803,7 +3803,30 @@ export function PrintersPage() {
   const viewMode: ViewMode = cardSize === 1 ? 'compact' : 'expanded';
   const queryClient = useQueryClient();
   // Embedded camera viewer state - supports multiple simultaneous viewers
-  const [embeddedCameraPrinters, setEmbeddedCameraPrinters] = useState<Map<number, { id: number; name: string }>>(new Map());
+  // Persisted to localStorage so cameras reopen after navigation
+  const [embeddedCameraPrinters, setEmbeddedCameraPrinters] = useState<Map<number, { id: number; name: string }>>(() => {
+    // Initialize from localStorage if camera_view_mode is embedded
+    const saved = localStorage.getItem('openEmbeddedCameras');
+    if (saved) {
+      try {
+        const cameras = JSON.parse(saved) as Array<{ id: number; name: string }>;
+        return new Map(cameras.map(c => [c.id, c]));
+      } catch {
+        return new Map();
+      }
+    }
+    return new Map();
+  });
+
+  // Persist open cameras to localStorage when they change
+  useEffect(() => {
+    const cameras = Array.from(embeddedCameraPrinters.values());
+    if (cameras.length > 0) {
+      localStorage.setItem('openEmbeddedCameras', JSON.stringify(cameras));
+    } else {
+      localStorage.removeItem('openEmbeddedCameras');
+    }
+  }, [embeddedCameraPrinters]);
 
   const { data: printers, isLoading } = useQuery({
     queryKey: ['printers'],
@@ -3815,6 +3838,13 @@ export function PrintersPage() {
     queryKey: ['settings'],
     queryFn: api.getSettings,
   });
+
+  // Close embedded cameras if mode changes to 'window'
+  useEffect(() => {
+    if (settings?.camera_view_mode === 'window' && embeddedCameraPrinters.size > 0) {
+      setEmbeddedCameraPrinters(new Map());
+    }
+  }, [settings?.camera_view_mode, embeddedCameraPrinters.size]);
 
   // Fetch all smart plugs to know which printers have them
   const { data: smartPlugs } = useQuery({
