@@ -2211,8 +2211,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ url, token }),
     }),
-  getHAEntities: () =>
-    request<HAEntity[]>('/smart-plugs/ha/entities'),
+  getHAEntities: (search?: string) => {
+    const params = search ? `?search=${encodeURIComponent(search)}` : '';
+    return request<HAEntity[]>(`/smart-plugs/ha/entities${params}`);
+  },
   getHASensorEntities: () =>
     request<HASensorEntity[]>('/smart-plugs/ha/sensors'),
 

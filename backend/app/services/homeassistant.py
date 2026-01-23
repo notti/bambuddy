@@ -215,8 +215,11 @@ class HomeAssistantService:
         except Exception as e:
             return {"success": False, "message": None, "error": str(e)}
 
-    async def list_entities(self, url: str, token: str) -> list[dict]:
-        """List available switch/light entities from HA.
+    async def list_entities(self, url: str, token: str, search: str | None = None) -> list[dict]:
+        """List available entities from HA.
+
+        By default, returns switch/light/input_boolean domains.
+        When search is provided, searches ALL entities by entity_id or friendly_name.
 
         Returns list of entity dicts with:
             - entity_id: str
@@ -224,6 +227,9 @@ class HomeAssistantService:
             - state: str
             - domain: str
         """
+        # Default domains for smart plug control
+        default_domains = {"switch", "light", "input_boolean"}
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(
@@ -233,20 +239,30 @@ class HomeAssistantService:
                 response.raise_for_status()
 
                 entities = []
+                search_lower = search.lower().strip() if search else None
+
                 for entity in response.json():
                     entity_id = entity.get("entity_id", "")
                     domain = entity_id.split(".")[0] if "." in entity_id else ""
+                    friendly_name = entity.get("attributes", {}).get("friendly_name", entity_id)
 
-                    # Filter to switch, light, input_boolean domains
-                    if domain in ["switch", "light", "input_boolean"]:
-                        entities.append(
-                            {
-                                "entity_id": entity_id,
-                                "friendly_name": entity.get("attributes", {}).get("friendly_name", entity_id),
-                                "state": entity.get("state"),
-                                "domain": domain,
-                            }
-                        )
+                    # If searching, match against entity_id or friendly_name
+                    if search_lower:
+                        if search_lower not in entity_id.lower() and search_lower not in friendly_name.lower():
+                            continue
+                    else:
+                        # No search: filter to default domains only
+                        if domain not in default_domains:
+                            continue
+
+                    entities.append(
+                        {
+                            "entity_id": entity_id,
+                            "friendly_name": friendly_name,
+                            "state": entity.get("state"),
+                            "domain": domain,
+                        }
+                    )
 
                 return sorted(entities, key=lambda x: x["friendly_name"].lower())
         except Exception as e:

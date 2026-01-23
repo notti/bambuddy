@@ -211,8 +211,14 @@ async def test_ha_connection(request: HATestConnectionRequest):
 
 
 @router.get("/ha/entities", response_model=list[HAEntity])
-async def list_ha_entities(db: AsyncSession = Depends(get_db)):
+async def list_ha_entities(
+    db: AsyncSession = Depends(get_db),
+    search: str | None = None,
+):
     """List available Home Assistant entities.
+
+    By default, returns switch/light/input_boolean entities.
+    When search is provided, searches ALL entities by entity_id or friendly_name.
 
     Requires HA connection settings to be configured in Settings.
     """
@@ -224,7 +230,7 @@ async def list_ha_entities(db: AsyncSession = Depends(get_db)):
             400, "Home Assistant not configured. Please set HA URL and token in Settings → Network → Home Assistant."
         )
 
-    entities = await homeassistant_service.list_entities(ha_url, ha_token)
+    entities = await homeassistant_service.list_entities(ha_url, ha_token, search)
     return [HAEntity(**e) for e in entities]
 
 
