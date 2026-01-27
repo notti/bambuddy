@@ -87,7 +87,11 @@ class GitHubBackupService:
 
             now = datetime.now(UTC)
             for config in configs:
-                if config.next_scheduled_run and config.next_scheduled_run <= now:
+                # Handle both naive (from DB) and aware datetimes
+                next_run = config.next_scheduled_run
+                if next_run and next_run.tzinfo is None:
+                    next_run = next_run.replace(tzinfo=UTC)
+                if next_run and next_run <= now:
                     logger.info(f"Running scheduled backup for config {config.id}")
                     await self.run_backup(config.id, trigger="scheduled")
 
