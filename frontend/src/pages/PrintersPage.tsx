@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTheme } from '../contexts/ThemeContext';
 import {
@@ -36,6 +36,9 @@ import {
   Wind,
   AirVent,
   Download,
+  ScanSearch,
+  CheckCircle,
+  XCircle,
 } from 'lucide-react';
 
 // Custom Skip Objects icon - arrow jumping over boxes
@@ -912,6 +915,7 @@ function PrinterCard({
   timeFormat = 'system',
   cameraViewMode = 'window',
   onOpenEmbeddedCamera,
+  checkPrinterFirmware = true,
 }: {
   printer: Printer;
   hideIfDisconnected?: boolean;
@@ -929,6 +933,7 @@ function PrinterCard({
   timeFormat?: 'system' | '12h' | '24h';
   cameraViewMode?: 'window' | 'embedded';
   onOpenEmbeddedCamera?: (printerId: number, printerName: string) => void;
+  checkPrinterFirmware?: boolean;
 }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -965,6 +970,23 @@ function PrinterCard({
     trayInfoIdx?: string;
   } | null>(null);
   const [showFirmwareModal, setShowFirmwareModal] = useState(false);
+  const [plateCheckResult, setPlateCheckResult] = useState<{
+    is_empty: boolean;
+    confidence: number;
+    difference_percent: number;
+    message: string;
+    debug_image_url?: string;
+    needs_calibration: boolean;
+    light_warning?: boolean;
+    reference_count?: number;
+    max_references?: number;
+    roi?: { x: number; y: number; w: number; h: number };
+  } | null>(null);
+  const [isCheckingPlate, setIsCheckingPlate] = useState(false);
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const [editingRoi, setEditingRoi] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [isSavingRoi, setIsSavingRoi] = useState(false);
+  const [plateCheckLightWasOff, setPlateCheckLightWasOff] = useState(false);
 
   const { data: status } = useQuery({
     queryKey: ['printerStatus', printer.id],
@@ -972,12 +994,13 @@ function PrinterCard({
     refetchInterval: 30000, // Fallback polling, WebSocket handles real-time
   });
 
-  // Check for firmware updates (cached for 5 minutes)
+  // Check for firmware updates (cached for 5 minutes, can be disabled in settings)
   const { data: firmwareInfo } = useQuery({
     queryKey: ['firmwareUpdate', printer.id],
     queryFn: () => firmwareApi.checkPrinterUpdate(printer.id),
     staleTime: 5 * 60 * 1000,
     refetchInterval: 5 * 60 * 1000,
+    enabled: checkPrinterFirmware,
   });
 
   // Collect unique tray_info_idx values for cloud filament info lookup
@@ -1187,6 +1210,16 @@ function PrinterCard({
     },
   });
 
+  // Plate detection setting mutation
+  const plateDetectionMutation = useMutation({
+    mutationFn: (enabled: boolean) => api.updatePrinter(printer.id, { plate_detection_enabled: enabled }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['printers'] });
+      showToast(plateDetectionMutation.variables ? 'Plate check enabled' : 'Plate check disabled');
+    },
+    onError: (error: Error) => showToast(error.message || 'Failed to update setting', 'error'),
+  });
+
   // Query for printable objects (for skip functionality)
   // Fetch when printing with 2+ objects OR when modal is open
   const isPrintingWithObjects = (status?.state === 'RUNNING' || status?.state === 'PAUSE' || status?.state === 'PAUSED') && (status?.printable_objects_count ?? 0) >= 2;
@@ -1249,6 +1282,144 @@ function PrinterCard({
       setRefreshingSlot(null);
     },
   });
+
+  // Plate references state
+  const [plateReferences, setPlateReferences] = useState<{
+    references: Array<{ index: number; label: string; timestamp: string; has_image: boolean; thumbnail_url: string }>;
+    max_references: number;
+  } | null>(null);
+  const [editingRefLabel, setEditingRefLabel] = useState<{ index: number; label: string } | null>(null);
+
+  // Fetch plate references
+  const fetchPlateReferences = async () => {
+    try {
+      const data = await api.getPlateReferences(printer.id);
+      setPlateReferences(data);
+    } catch {
+      // Ignore errors - references will show as empty
+    }
+  };
+
+  // Toggle plate detection enabled/disabled
+  const handleTogglePlateDetection = () => {
+    plateDetectionMutation.mutate(!printer.plate_detection_enabled);
+  };
+
+  // Open plate detection management modal (for calibration/references)
+  const handleOpenPlateManagement = async () => {
+    setIsCheckingPlate(true);
+    setPlateCheckResult(null);
+
+    // Auto-turn on light if it's off
+    const lightWasOff = status?.chamber_light === false;
+    setPlateCheckLightWasOff(lightWasOff);
+    if (lightWasOff) {
+      await api.setChamberLight(printer.id, true);
+      // Wait for light to physically turn on and camera to adjust exposure
+      // (MQTT command is async, light takes ~1s to turn on, camera needs time to adjust)
+      await new Promise(resolve => setTimeout(resolve, 2500));
+    }
+
+    try {
+      const result = await api.checkPlateEmpty(printer.id, { includeDebugImage: true });
+      setPlateCheckResult(result);
+      fetchPlateReferences();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Failed to check plate', 'error');
+      // Restore light if check failed
+      if (lightWasOff) {
+        await api.setChamberLight(printer.id, false);
+        setPlateCheckLightWasOff(false);
+      }
+    } finally {
+      setIsCheckingPlate(false);
+    }
+  };
+
+  // Close plate check modal and restore light state
+  const closePlateCheckModal = useCallback(async () => {
+    setPlateCheckResult(null);
+    // Restore light to original state if we turned it on
+    if (plateCheckLightWasOff) {
+      await api.setChamberLight(printer.id, false);
+      setPlateCheckLightWasOff(false);
+    }
+  }, [plateCheckLightWasOff, printer.id]);
+
+  // Calibrate plate detection handler
+  const handleCalibratePlate = async (label?: string) => {
+    setIsCalibrating(true);
+    try {
+      const result = await api.calibratePlateDetection(printer.id, { label });
+      if (result.success) {
+        showToast(result.message || 'Calibration saved!', 'success');
+        // Refresh references and re-check
+        fetchPlateReferences();
+        const checkResult = await api.checkPlateEmpty(printer.id, { includeDebugImage: true });
+        setPlateCheckResult(checkResult);
+      } else {
+        showToast(result.message || 'Calibration failed', 'error');
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Calibration failed', 'error');
+    } finally {
+      setIsCalibrating(false);
+    }
+  };
+
+  // Update reference label
+  const handleUpdateRefLabel = async (index: number, label: string) => {
+    try {
+      await api.updatePlateReferenceLabel(printer.id, index, label);
+      setEditingRefLabel(null);
+      fetchPlateReferences();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Failed to update label', 'error');
+    }
+  };
+
+  // Delete reference
+  const handleDeleteRef = async (index: number) => {
+    try {
+      await api.deletePlateReference(printer.id, index);
+      showToast('Reference deleted', 'success');
+      fetchPlateReferences();
+      // Re-check to update counts
+      const checkResult = await api.checkPlateEmpty(printer.id, { includeDebugImage: true });
+      setPlateCheckResult(checkResult);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Failed to delete reference', 'error');
+    }
+  };
+
+  // Save ROI settings
+  const handleSaveRoi = async () => {
+    if (!editingRoi) return;
+    setIsSavingRoi(true);
+    try {
+      await api.updatePrinter(printer.id, { plate_detection_roi: editingRoi });
+      showToast('Detection area saved', 'success');
+      setEditingRoi(null);
+      // Re-check to see new ROI in action
+      const checkResult = await api.checkPlateEmpty(printer.id, { includeDebugImage: true });
+      setPlateCheckResult(checkResult);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Failed to save detection area', 'error');
+    } finally {
+      setIsSavingRoi(false);
+    }
+  };
+
+  // Close plate check modal on Escape key
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && plateCheckResult) {
+        closePlateCheckModal();
+      }
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [plateCheckResult, closePlateCheckModal]);
 
   // Watch ams_status_main to detect when RFID read completes
   // ams_status_main: 0=idle, 2=rfid_identifying
@@ -1354,7 +1525,7 @@ function PrinterCard({
                   {viewMode === 'compact' && (
                     <div
                       className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                        status?.connected ? 'bg-bambu-green' : 'bg-red-500'
+                        status?.connected ? 'bg-status-ok' : 'bg-status-error'
                       }`}
                       title={status?.connected ? 'Connected' : 'Offline'}
                     />
@@ -1440,8 +1611,8 @@ function PrinterCard({
               <span
                 className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs ${
                   status?.connected
-                    ? 'bg-bambu-green/20 text-bambu-green'
-                    : 'bg-red-500/20 text-red-400'
+                    ? 'bg-status-ok/20 text-status-ok'
+                    : 'bg-status-error/20 text-status-error'
                 }`}
               >
                 {status?.connected ? (
@@ -1456,14 +1627,14 @@ function PrinterCard({
                 <span
                   className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs ${
                     wifiSignal >= -50
-                      ? 'bg-bambu-green/20 text-bambu-green'
+                      ? 'bg-status-ok/20 text-status-ok'
                       : wifiSignal >= -60
-                      ? 'bg-bambu-green/20 text-bambu-green'
+                      ? 'bg-status-ok/20 text-status-ok'
                       : wifiSignal >= -70
-                      ? 'bg-amber-500/20 text-amber-600'
+                      ? 'bg-status-warning/20 text-status-warning'
                       : wifiSignal >= -80
                       ? 'bg-orange-500/20 text-orange-600'
-                      : 'bg-red-500/20 text-red-600'
+                      : 'bg-status-error/20 text-status-error'
                   }`}
                   title={`WiFi: ${wifiSignal} dBm - ${getWifiStrength(wifiSignal).label}`}
                 >
@@ -1480,9 +1651,9 @@ function PrinterCard({
                     className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs cursor-pointer hover:opacity-80 transition-opacity ${
                       knownErrors.length > 0
                         ? knownErrors.some(e => e.severity <= 2)
-                          ? 'bg-red-500/20 text-red-400'
-                          : 'bg-orange-500/20 text-orange-400'
-                        : 'bg-bambu-green/20 text-bambu-green'
+                          ? 'bg-status-error/20 text-status-error'
+                          : 'bg-status-warning/20 text-status-warning'
+                        : 'bg-status-ok/20 text-status-ok'
                     }`}
                     title="Click to view HMS errors"
                   >
@@ -1497,10 +1668,10 @@ function PrinterCard({
                   onClick={() => navigate('/maintenance')}
                   className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs cursor-pointer hover:opacity-80 transition-opacity ${
                     maintenanceInfo.due_count > 0
-                      ? 'bg-red-500/20 text-red-400'
+                      ? 'bg-status-error/20 text-status-error'
                       : maintenanceInfo.warning_count > 0
-                      ? 'bg-orange-500/20 text-orange-400'
-                      : 'bg-bambu-green/20 text-bambu-green'
+                      ? 'bg-status-warning/20 text-status-warning'
+                      : 'bg-status-ok/20 text-status-ok'
                   }`}
                   title={
                     maintenanceInfo.due_count > 0 || maintenanceInfo.warning_count > 0
@@ -2560,6 +2731,37 @@ function PrinterCard({
               >
                 <Video className="w-4 h-4" />
               </Button>
+              {/* Split button: main part toggles detection, chevron opens modal */}
+              <div className={`inline-flex rounded-md ${printer.plate_detection_enabled ? 'ring-1 ring-green-500' : ''}`}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleTogglePlateDetection}
+                  disabled={!status?.connected || plateDetectionMutation.isPending}
+                  title={printer.plate_detection_enabled ? "Plate check enabled - Click to disable" : "Plate check disabled - Click to enable"}
+                  className={`!rounded-r-none !border-r-0 ${printer.plate_detection_enabled ? "!border-green-500 !text-green-400 hover:!bg-green-500/20" : ""}`}
+                >
+                  {plateDetectionMutation.isPending ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <ScanSearch className="w-4 h-4" />
+                  )}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleOpenPlateManagement}
+                  disabled={!status?.connected || isCheckingPlate}
+                  title="Manage plate detection calibration"
+                  className={`!rounded-l-none !px-1.5 ${printer.plate_detection_enabled ? "!border-green-500 !text-green-400 hover:!bg-green-500/20" : ""}`}
+                >
+                  {isCheckingPlate ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <ChevronDown className="w-3 h-3" />
+                  )}
+                </Button>
+              </div>
               <Button
                 variant="secondary"
                 size="sm"
@@ -2590,6 +2792,274 @@ function PrinterCard({
           printerName={printer.name}
           onClose={() => setShowMQTTDebug(false)}
         />
+      )}
+
+      {/* Plate Check Result Modal */}
+      {plateCheckResult && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => closePlateCheckModal()}>
+          <div className="bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-xl shadow-2xl max-w-lg w-full" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-bambu-dark-tertiary">
+              <div className="flex items-center gap-2">
+                {plateCheckResult.needs_calibration ? (
+                  <ScanSearch className="w-5 h-5 text-blue-500" />
+                ) : plateCheckResult.is_empty ? (
+                  <CheckCircle className="w-5 h-5 text-green-500" />
+                ) : (
+                  <XCircle className="w-5 h-5 text-yellow-500" />
+                )}
+                <h2 className="text-lg font-semibold text-white">
+                  Build Plate Check
+                </h2>
+                {plateCheckResult.reference_count !== undefined && plateCheckResult.max_references && (
+                  <span className="text-xs text-bambu-gray bg-bambu-dark-tertiary px-2 py-1 rounded">
+                    {plateCheckResult.reference_count}/{plateCheckResult.max_references} refs
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={() => closePlateCheckModal()}
+                className="p-1 text-bambu-gray hover:text-white rounded transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              {plateCheckResult.needs_calibration ? (
+                <>
+                  <div className="p-3 rounded-lg bg-blue-500/20 border border-blue-500/50">
+                    <p className="font-medium text-blue-400">
+                      Calibration Required
+                    </p>
+                    <p className="text-sm text-bambu-gray mt-1">
+                      Please ensure the build plate is <strong>completely empty</strong>, then click Calibrate.
+                    </p>
+                  </div>
+                  <div className="text-sm text-bambu-gray space-y-2">
+                    <p>Calibration captures a reference image of the empty plate. Future checks will compare against this reference to detect objects.</p>
+                    <p><strong>Tip:</strong> You can store up to 5 calibrations for different plates. The system automatically uses the best match when checking.</p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className={`p-3 rounded-lg ${plateCheckResult.is_empty ? 'bg-green-500/20 border border-green-500/50' : 'bg-yellow-500/20 border border-yellow-500/50'}`}>
+                    <p className={`font-medium ${plateCheckResult.is_empty ? 'text-green-400' : 'text-yellow-400'}`}>
+                      {plateCheckResult.is_empty ? 'Plate appears empty' : 'Objects detected on plate'}
+                    </p>
+                    <p className="text-sm text-bambu-gray mt-1">
+                      Confidence: {Math.round(plateCheckResult.confidence * 100)}% | Difference: {plateCheckResult.difference_percent.toFixed(1)}%
+                    </p>
+                  </div>
+                  {plateCheckResult.debug_image_url && (
+                    <div>
+                      <p className="text-sm text-bambu-gray mb-2">Analysis preview:</p>
+                      <img
+                        src={plateCheckResult.debug_image_url}
+                        alt="Plate detection analysis"
+                        className="w-full rounded-lg border border-bambu-dark-tertiary"
+                      />
+                      <p className="text-xs text-bambu-gray mt-2">
+                        Green box = detection area, Red overlay = differences from calibration
+                      </p>
+                    </div>
+                  )}
+                  <p className="text-xs text-bambu-gray">
+                    {plateCheckResult.message}
+                  </p>
+                </>
+              )}
+
+              {/* Saved References Grid */}
+              {plateReferences && plateReferences.references.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-bambu-dark-tertiary">
+                  <p className="text-sm font-medium text-white mb-2">
+                    Saved References ({plateReferences.references.length}/{plateReferences.max_references})
+                  </p>
+                  <div className="grid grid-cols-5 gap-2">
+                    {plateReferences.references.map((ref) => (
+                      <div key={ref.index} className="relative group">
+                        <img
+                          src={api.getPlateReferenceThumbnailUrl(printer.id, ref.index)}
+                          alt={ref.label || `Reference ${ref.index + 1}`}
+                          className="w-full aspect-video object-cover rounded border border-bambu-dark-tertiary"
+                        />
+                        {/* Delete button */}
+                        <button
+                          onClick={() => handleDeleteRef(ref.index)}
+                          className="absolute top-1 right-1 p-0.5 bg-red-500/80 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Delete reference"
+                        >
+                          <X className="w-3 h-3 text-white" />
+                        </button>
+                        {/* Label */}
+                        {editingRefLabel?.index === ref.index ? (
+                          <input
+                            type="text"
+                            value={editingRefLabel.label}
+                            onChange={(e) => setEditingRefLabel({ ...editingRefLabel, label: e.target.value })}
+                            onBlur={() => handleUpdateRefLabel(ref.index, editingRefLabel.label)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') handleUpdateRefLabel(ref.index, editingRefLabel.label);
+                              if (e.key === 'Escape') setEditingRefLabel(null);
+                            }}
+                            className="w-full mt-1 px-1 py-0.5 text-xs bg-bambu-dark-tertiary border border-bambu-green rounded text-white"
+                            autoFocus
+                            placeholder="Label..."
+                          />
+                        ) : (
+                          <p
+                            className="text-xs text-bambu-gray mt-1 truncate cursor-pointer hover:text-white"
+                            onClick={() => setEditingRefLabel({ index: ref.index, label: ref.label })}
+                            title={ref.label ? `${ref.label} - Click to edit` : 'Click to add label'}
+                          >
+                            {ref.label || <span className="italic opacity-50">No label</span>}
+                          </p>
+                        )}
+                        {/* Timestamp */}
+                        <p className="text-[10px] text-bambu-gray/60">
+                          {ref.timestamp ? new Date(ref.timestamp).toLocaleDateString() : ''}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ROI Editor */}
+              {!plateCheckResult.needs_calibration && (
+                <div className="mt-4 pt-4 border-t border-bambu-dark-tertiary">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm font-medium text-white">Detection Area (ROI)</p>
+                    {!editingRoi ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setEditingRoi(plateCheckResult.roi || { x: 0.15, y: 0.35, w: 0.70, h: 0.55 })}
+                      >
+                        <Pencil className="w-3 h-3 mr-1" />
+                        Edit
+                      </Button>
+                    ) : (
+                      <div className="flex gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setEditingRoi(null)}
+                          disabled={isSavingRoi}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={handleSaveRoi}
+                          disabled={isSavingRoi}
+                        >
+                          {isSavingRoi ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Save'}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                  {editingRoi ? (
+                    <div className="space-y-3 bg-bambu-dark-tertiary/50 p-3 rounded-lg">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-xs text-bambu-gray">X Start</label>
+                          <input
+                            type="range"
+                            min="0"
+                            max="0.9"
+                            step="0.01"
+                            value={editingRoi.x}
+                            onChange={(e) => setEditingRoi({ ...editingRoi, x: parseFloat(e.target.value) })}
+                            className="w-full h-1.5 bg-bambu-dark-tertiary rounded-lg cursor-pointer accent-green-500"
+                          />
+                          <span className="text-xs text-bambu-gray">{Math.round(editingRoi.x * 100)}%</span>
+                        </div>
+                        <div>
+                          <label className="text-xs text-bambu-gray">Y Start</label>
+                          <input
+                            type="range"
+                            min="0"
+                            max="0.9"
+                            step="0.01"
+                            value={editingRoi.y}
+                            onChange={(e) => setEditingRoi({ ...editingRoi, y: parseFloat(e.target.value) })}
+                            className="w-full h-1.5 bg-bambu-dark-tertiary rounded-lg cursor-pointer accent-green-500"
+                          />
+                          <span className="text-xs text-bambu-gray">{Math.round(editingRoi.y * 100)}%</span>
+                        </div>
+                        <div>
+                          <label className="text-xs text-bambu-gray">Width</label>
+                          <input
+                            type="range"
+                            min="0.1"
+                            max="1"
+                            step="0.01"
+                            value={editingRoi.w}
+                            onChange={(e) => setEditingRoi({ ...editingRoi, w: parseFloat(e.target.value) })}
+                            className="w-full h-1.5 bg-bambu-dark-tertiary rounded-lg cursor-pointer accent-green-500"
+                          />
+                          <span className="text-xs text-bambu-gray">{Math.round(editingRoi.w * 100)}%</span>
+                        </div>
+                        <div>
+                          <label className="text-xs text-bambu-gray">Height</label>
+                          <input
+                            type="range"
+                            min="0.1"
+                            max="1"
+                            step="0.01"
+                            value={editingRoi.h}
+                            onChange={(e) => setEditingRoi({ ...editingRoi, h: parseFloat(e.target.value) })}
+                            className="w-full h-1.5 bg-bambu-dark-tertiary rounded-lg cursor-pointer accent-green-500"
+                          />
+                          <span className="text-xs text-bambu-gray">{Math.round(editingRoi.h * 100)}%</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-bambu-gray">
+                        Adjust the detection area to focus on the build plate. The green box in the preview shows the current area.
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-bambu-gray">
+                      Current: X={Math.round((plateCheckResult.roi?.x || 0.15) * 100)}%, Y={Math.round((plateCheckResult.roi?.y || 0.35) * 100)}%,
+                      W={Math.round((plateCheckResult.roi?.w || 0.70) * 100)}%, H={Math.round((plateCheckResult.roi?.h || 0.55) * 100)}%
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 p-4 border-t border-bambu-dark-tertiary">
+              {plateCheckResult.needs_calibration ? (
+                <>
+                  <Button variant="ghost" onClick={() => closePlateCheckModal()}>
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={() => handleCalibratePlate()}
+                    disabled={isCalibrating}
+                  >
+                    {isCalibrating ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Calibrating...
+                      </>
+                    ) : (
+                      'Calibrate Empty Plate'
+                    )}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button variant="ghost" onClick={() => handleCalibratePlate()} disabled={isCalibrating}>
+                    {isCalibrating ? 'Adding...' : `Add Reference (${plateReferences?.references.length || 0}/${plateReferences?.max_references || 5})`}
+                  </Button>
+                  <Button onClick={() => closePlateCheckModal()}>
+                    Close
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Power On Confirmation */}
@@ -3487,8 +3957,8 @@ function FirmwareUpdateModal({
               <div className="w-full bg-bambu-dark-tertiary rounded-full h-2">
                 <div
                   className={`h-2 rounded-full transition-all ${
-                    uploadStatus.status === 'error' ? 'bg-red-500' :
-                    uploadStatus.status === 'complete' ? 'bg-bambu-green' : 'bg-orange-500'
+                    uploadStatus.status === 'error' ? 'bg-status-error' :
+                    uploadStatus.status === 'complete' ? 'bg-status-ok' : 'bg-orange-500'
                   } ${uploadStatus.status === 'uploading' ? 'animate-pulse' : ''}`}
                   style={{ width: `${uploadStatus.progress}%` }}
                 />
@@ -4181,6 +4651,7 @@ export function PrintersPage() {
                     timeFormat={settings?.time_format || 'system'}
                     cameraViewMode={settings?.camera_view_mode || 'window'}
                     onOpenEmbeddedCamera={(id, name) => setEmbeddedCameraPrinters(prev => new Map(prev).set(id, { id, name }))}
+                    checkPrinterFirmware={settings?.check_printer_firmware !== false}
                   />
                 ))}
               </div>
@@ -4209,6 +4680,7 @@ export function PrintersPage() {
               timeFormat={settings?.time_format || 'system'}
               cameraViewMode={settings?.camera_view_mode || 'window'}
               onOpenEmbeddedCamera={(id, name) => setEmbeddedCameraPrinters(prev => new Map(prev).set(id, { id, name }))}
+              checkPrinterFirmware={settings?.check_printer_firmware !== false}
             />
           ))}
         </div>

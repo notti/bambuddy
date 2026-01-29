@@ -1,11 +1,11 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Loader2, Plus, Plug, AlertTriangle, RotateCcw, Bell, Download, RefreshCw, ExternalLink, Globe, Droplets, Thermometer, FileText, Edit2, Send, CheckCircle, XCircle, History, Trash2, Upload, Zap, TrendingUp, Calendar, DollarSign, Power, PowerOff, Key, Copy, Database, Info, X, Shield, Printer, Cylinder, Wifi, Home, Video, Users, Lock, Unlock } from 'lucide-react';
+import { Loader2, Plus, Plug, AlertTriangle, RotateCcw, Bell, Download, RefreshCw, ExternalLink, Globe, Droplets, Thermometer, FileText, Edit2, Send, CheckCircle, XCircle, History, Trash2, Zap, TrendingUp, Calendar, DollarSign, Power, PowerOff, Key, Copy, Database, X, Shield, Printer, Cylinder, Wifi, Home, Video, Users, Lock, Unlock } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { formatDateOnly } from '../utils/date';
-import type { AppSettings, AppSettingsUpdate, SmartPlug, SmartPlugStatus, NotificationProvider, NotificationTemplate, UpdateStatus } from '../api/client';
+import type { AppSettings, AppSettingsUpdate, SmartPlug, SmartPlugStatus, NotificationProvider, NotificationTemplate, UpdateStatus, GitHubBackupStatus, CloudAuthStatus } from '../api/client';
 import { Card, CardContent, CardHeader } from '../components/Card';
 import { Button } from '../components/Button';
 import { SmartPlugCard } from '../components/SmartPlugCard';
@@ -15,11 +15,10 @@ import { AddNotificationModal } from '../components/AddNotificationModal';
 import { NotificationTemplateEditor } from '../components/NotificationTemplateEditor';
 import { NotificationLogViewer } from '../components/NotificationLogViewer';
 import { ConfirmModal } from '../components/ConfirmModal';
-import { BackupModal } from '../components/BackupModal';
-import { RestoreModal } from '../components/RestoreModal';
 import { SpoolmanSettings } from '../components/SpoolmanSettings';
 import { ExternalLinksSettings } from '../components/ExternalLinksSettings';
 import { VirtualPrinterSettings } from '../components/VirtualPrinterSettings';
+import { GitHubBackupSettings } from '../components/GitHubBackupSettings';
 import { APIBrowser } from '../components/APIBrowser';
 import { virtualPrinterApi } from '../api/client';
 import { defaultNavItems, getDefaultView, setDefaultView } from '../components/Layout';
@@ -29,7 +28,7 @@ import { useTheme, type ThemeStyle, type DarkBackground, type LightBackground, t
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Palette } from 'lucide-react';
 
-const validTabs = ['general', 'network', 'plugs', 'notifications', 'filament', 'apikeys', 'virtual-printer', 'users'] as const;
+const validTabs = ['general', 'network', 'plugs', 'notifications', 'filament', 'apikeys', 'virtual-printer', 'users', 'backup'] as const;
 type TabType = typeof validTabs[number];
 
 export function SettingsPage() {
@@ -37,7 +36,7 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { t, i18n } = useTranslation();
-  const { showToast, showPersistentToast, dismissToast } = useToast();
+  const { showToast } = useToast();
   const { authEnabled, user, refreshAuth } = useAuth();
   const {
     mode,
@@ -85,15 +84,16 @@ export function SettingsPage() {
   const [showClearLogsConfirm, setShowClearLogsConfirm] = useState(false);
   const [showClearStorageConfirm, setShowClearStorageConfirm] = useState(false);
   const [showBulkPlugConfirm, setShowBulkPlugConfirm] = useState<'on' | 'off' | null>(null);
-  const [showBackupModal, setShowBackupModal] = useState(false);
-  const [showRestoreModal, setShowRestoreModal] = useState(false);
-  const [showTelemetryInfo, setShowTelemetryInfo] = useState(false);
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
   const [showDisableAuthConfirm, setShowDisableAuthConfirm] = useState(false);
 
   // Home Assistant test connection state
   const [haTestResult, setHaTestResult] = useState<{ success: boolean; message: string | null; error: string | null } | null>(null);
   const [haTestLoading, setHaTestLoading] = useState(false);
+
+  // External camera test state
+  const [extCameraTestResults, setExtCameraTestResults] = useState<Record<number, { success: boolean; error?: string; resolution?: string } | null>>({});
+  const [extCameraTestLoading, setExtCameraTestLoading] = useState<Record<number, boolean>>({});
 
   const handleDefaultViewChange = (path: string) => {
     setDefaultViewState(path);
@@ -251,6 +251,18 @@ export function SettingsPage() {
     refetchInterval: activeTab === 'network' ? 5000 : false, // Poll every 5s when on Network tab
   });
 
+  // GitHub backup status for Backup tab indicator
+  const { data: githubBackupStatus } = useQuery<GitHubBackupStatus>({
+    queryKey: ['github-backup-status'],
+    queryFn: api.getGitHubBackupStatus,
+  });
+
+  // Cloud auth status for Backup tab indicator
+  const { data: cloudAuthStatus } = useQuery<CloudAuthStatus>({
+    queryKey: ['cloud-status'],
+    queryFn: api.getCloudStatus,
+  });
+
   const applyUpdateMutation = useMutation({
     mutationFn: api.applyUpdate,
     onSuccess: (data) => {
@@ -366,6 +378,18 @@ export function SettingsPage() {
     },
   });
 
+  const updatePrinterMutation = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: Partial<{ external_camera_url: string | null; external_camera_type: string | null; external_camera_enabled: boolean }> }) =>
+      api.updatePrinter(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['printers'] });
+      showToast('Camera settings saved', 'success');
+    },
+    onError: (error: Error) => {
+      showToast(`Failed to update printer: ${error.message}`, 'error');
+    },
+  });
+
   // Debounced auto-save when localSettings change
   useEffect(() => {
     // Skip if initial load or no settings
@@ -383,8 +407,8 @@ export function SettingsPage() {
       settings.energy_cost_per_kwh !== localSettings.energy_cost_per_kwh ||
       settings.energy_tracking_mode !== localSettings.energy_tracking_mode ||
       settings.check_updates !== localSettings.check_updates ||
+      (settings.check_printer_firmware ?? true) !== (localSettings.check_printer_firmware ?? true) ||
       settings.notification_language !== localSettings.notification_language ||
-      settings.telemetry_enabled !== localSettings.telemetry_enabled ||
       settings.ams_humidity_good !== localSettings.ams_humidity_good ||
       settings.ams_humidity_fair !== localSettings.ams_humidity_fair ||
       settings.ams_temp_good !== localSettings.ams_temp_good ||
@@ -411,7 +435,9 @@ export function SettingsPage() {
       settings.ha_token !== localSettings.ha_token ||
       (settings.library_archive_mode ?? 'ask') !== (localSettings.library_archive_mode ?? 'ask') ||
       Number(settings.library_disk_warning_gb ?? 5) !== Number(localSettings.library_disk_warning_gb ?? 5) ||
-      (settings.camera_view_mode ?? 'window') !== (localSettings.camera_view_mode ?? 'window');
+      (settings.camera_view_mode ?? 'window') !== (localSettings.camera_view_mode ?? 'window') ||
+      settings.prometheus_enabled !== localSettings.prometheus_enabled ||
+      settings.prometheus_token !== localSettings.prometheus_token;
 
     if (!hasChanges) {
       return;
@@ -444,8 +470,8 @@ export function SettingsPage() {
         energy_cost_per_kwh: localSettings.energy_cost_per_kwh,
         energy_tracking_mode: localSettings.energy_tracking_mode,
         check_updates: localSettings.check_updates,
+        check_printer_firmware: localSettings.check_printer_firmware,
         notification_language: localSettings.notification_language,
-        telemetry_enabled: localSettings.telemetry_enabled,
         ams_humidity_good: localSettings.ams_humidity_good,
         ams_humidity_fair: localSettings.ams_humidity_fair,
         ams_temp_good: localSettings.ams_temp_good,
@@ -473,6 +499,8 @@ export function SettingsPage() {
         library_archive_mode: localSettings.library_archive_mode,
         library_disk_warning_gb: localSettings.library_disk_warning_gb,
         camera_view_mode: localSettings.camera_view_mode,
+        prometheus_enabled: localSettings.prometheus_enabled,
+        prometheus_token: localSettings.prometheus_token,
       };
       updateMutation.mutate(settingsToSave);
     }, 500);
@@ -488,6 +516,74 @@ export function SettingsPage() {
   const updateSetting = useCallback(<K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setLocalSettings(prev => prev ? { ...prev, [key]: value } : null);
   }, []);
+
+  const handleTestExternalCamera = async (printerId: number, url: string, cameraType: string) => {
+    if (!url) {
+      showToast('Please enter a camera URL', 'error');
+      return;
+    }
+    setExtCameraTestLoading(prev => ({ ...prev, [printerId]: true }));
+    setExtCameraTestResults(prev => ({ ...prev, [printerId]: null }));
+    try {
+      const result = await api.testExternalCamera(printerId, url, cameraType);
+      setExtCameraTestResults(prev => ({ ...prev, [printerId]: result }));
+      if (result.success) {
+        showToast(`Camera connected${result.resolution ? ` (${result.resolution})` : ''}`, 'success');
+      } else {
+        showToast(result.error || 'Connection failed', 'error');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Test failed';
+      setExtCameraTestResults(prev => ({ ...prev, [printerId]: { success: false, error: message } }));
+      showToast(message, 'error');
+    } finally {
+      setExtCameraTestLoading(prev => ({ ...prev, [printerId]: false }));
+    }
+  };
+
+  // Local state for camera URL inputs (to avoid saving on every keystroke)
+  const [localCameraUrls, setLocalCameraUrls] = useState<Record<number, string>>({});
+  const cameraUrlSaveTimeoutRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+
+  // Initialize local camera URLs from printer data
+  useEffect(() => {
+    if (printers) {
+      const urls: Record<number, string> = {};
+      printers.forEach(p => {
+        if (p.external_camera_url && localCameraUrls[p.id] === undefined) {
+          urls[p.id] = p.external_camera_url;
+        }
+      });
+      if (Object.keys(urls).length > 0) {
+        setLocalCameraUrls(prev => ({ ...prev, ...urls }));
+      }
+    }
+  }, [printers]);
+
+  const handleCameraUrlChange = (printerId: number, url: string) => {
+    // Update local state immediately for responsive UI
+    setLocalCameraUrls(prev => ({ ...prev, [printerId]: url }));
+
+    // Clear existing timeout for this printer
+    if (cameraUrlSaveTimeoutRef.current[printerId]) {
+      clearTimeout(cameraUrlSaveTimeoutRef.current[printerId]);
+    }
+
+    // Debounce the save (800ms delay)
+    cameraUrlSaveTimeoutRef.current[printerId] = setTimeout(() => {
+      updatePrinterMutation.mutate({
+        id: printerId,
+        data: { external_camera_url: url || null }
+      });
+    }, 800);
+  };
+
+  const handleUpdatePrinterCamera = (printerId: number, updates: { type?: string; enabled?: boolean }) => {
+    const data: Partial<{ external_camera_type: string | null; external_camera_enabled: boolean }> = {};
+    if (updates.type !== undefined) data.external_camera_type = updates.type || null;
+    if (updates.enabled !== undefined) data.external_camera_enabled = updates.enabled;
+    updatePrinterMutation.mutate({ id: printerId, data });
+  };
 
   if (isLoading || !localSettings) {
     return (
@@ -612,6 +708,18 @@ export function SettingsPage() {
           {authEnabled && (
             <span className={`w-2 h-2 rounded-full ${authEnabled ? 'bg-green-400' : 'bg-gray-500'}`} />
           )}
+        </button>
+        <button
+          onClick={() => handleTabChange('backup')}
+          className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px flex items-center gap-2 ${
+            activeTab === 'backup'
+              ? 'text-bambu-green border-bambu-green'
+              : 'text-bambu-gray hover:text-gray-900 dark:hover:text-white border-transparent'
+          }`}
+        >
+          <Database className="w-4 h-4" />
+          Backup
+          <span className={`w-2 h-2 rounded-full ${cloudAuthStatus?.is_authenticated && githubBackupStatus?.configured && githubBackupStatus?.enabled ? 'bg-green-400' : 'bg-gray-500'}`} />
         </button>
       </div>
 
@@ -952,6 +1060,88 @@ export function SettingsPage() {
                     : 'Camera opens in a separate browser window'}
                 </p>
               </div>
+
+              {/* External Cameras Section */}
+              <div className="border-t border-bambu-dark-tertiary pt-4 mt-4">
+                <h3 className="text-sm font-medium text-white mb-2">External Cameras</h3>
+                <p className="text-xs text-bambu-gray mb-3">
+                  Configure external cameras to replace the built-in printer camera. Supports MJPEG streams, RTSP, HTTP snapshots, and USB cameras (V4L2). When enabled, the external camera is used for live view and finish photos.
+                </p>
+
+                {printers && printers.length > 0 ? (
+                  <div className="space-y-3">
+                    {printers.map(printer => (
+                      <div key={printer.id} className="p-3 bg-bambu-dark rounded-lg">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-white font-medium text-sm">{printer.name}</span>
+                          <label className="relative inline-flex items-center cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={printer.external_camera_enabled}
+                              onChange={(e) => handleUpdatePrinterCamera(printer.id, { enabled: e.target.checked })}
+                              className="sr-only peer"
+                            />
+                            <div className="w-9 h-5 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bambu-green"></div>
+                          </label>
+                        </div>
+
+                        {printer.external_camera_enabled && (
+                          <div className="space-y-2 mt-2">
+                            <input
+                              type="text"
+                              placeholder={printer.external_camera_type === 'usb' ? 'Device path (/dev/video0)' : 'Camera URL (rtsp://... or http://...)'}
+                              value={localCameraUrls[printer.id] ?? printer.external_camera_url ?? ''}
+                              onChange={(e) => handleCameraUrlChange(printer.id, e.target.value)}
+                              className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded text-white text-sm focus:border-bambu-green focus:outline-none"
+                            />
+                            <div className="flex gap-2">
+                              <select
+                                value={printer.external_camera_type || 'mjpeg'}
+                                onChange={(e) => handleUpdatePrinterCamera(printer.id, { type: e.target.value })}
+                                className="flex-1 px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded text-white text-sm focus:border-bambu-green focus:outline-none"
+                              >
+                                <option value="mjpeg">MJPEG Stream</option>
+                                <option value="rtsp">RTSP Stream</option>
+                                <option value="snapshot">HTTP Snapshot</option>
+                                <option value="usb">USB Camera (V4L2)</option>
+                              </select>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() => handleTestExternalCamera(printer.id, localCameraUrls[printer.id] ?? printer.external_camera_url ?? '', printer.external_camera_type || 'mjpeg')}
+                                disabled={extCameraTestLoading[printer.id] || !(localCameraUrls[printer.id] ?? printer.external_camera_url)}
+                              >
+                                {extCameraTestLoading[printer.id] ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  'Test'
+                                )}
+                              </Button>
+                            </div>
+                            {extCameraTestResults[printer.id] && (
+                              <div className={`text-xs flex items-center gap-1 ${extCameraTestResults[printer.id]?.success ? 'text-green-500' : 'text-red-500'}`}>
+                                {extCameraTestResults[printer.id]?.success ? (
+                                  <>
+                                    <CheckCircle className="w-3 h-3" />
+                                    Connected{extCameraTestResults[printer.id]?.resolution && ` (${extCameraTestResults[printer.id]?.resolution})`}
+                                  </>
+                                ) : (
+                                  <>
+                                    <XCircle className="w-3 h-3" />
+                                    {extCameraTestResults[printer.id]?.error || 'Connection failed'}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-bambu-gray italic">No printers configured</p>
+                )}
+              </div>
             </CardContent>
           </Card>
 
@@ -1110,31 +1300,21 @@ export function SettingsPage() {
               </div>
               <div className="flex items-center justify-between">
                 <div>
-                  <div className="flex items-center gap-2">
-                    <p className="text-white">{t('settings.telemetry')}</p>
-                    <button
-                      onClick={() => setShowTelemetryInfo(true)}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-bambu-dark rounded-full text-bambu-gray hover:text-white hover:bg-bambu-dark-tertiary transition-colors"
-                    >
-                      <Info className="w-3 h-3" />
-                      {t('settings.telemetryLearnMore')}
-                    </button>
-                  </div>
+                  <p className="text-white">Check printer firmware</p>
                   <p className="text-sm text-bambu-gray">
-                    {t('settings.telemetryDescription')}
+                    Check for printer firmware updates from Bambu Lab
                   </p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={localSettings.telemetry_enabled}
-                    onChange={(e) => updateSetting('telemetry_enabled', e.target.checked)}
+                    checked={localSettings.check_printer_firmware ?? true}
+                    onChange={(e) => updateSetting('check_printer_firmware', e.target.checked)}
                     className="sr-only peer"
                   />
                   <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
                 </label>
               </div>
-
               <div className="border-t border-bambu-dark-tertiary pt-4">
                 <div className="flex items-center justify-between mb-2">
                   <div>
@@ -1254,57 +1434,21 @@ export function SettingsPage() {
               <h2 className="text-lg font-semibold text-white">Data Management</h2>
             </CardHeader>
             <CardContent className="space-y-4">
-              {/* Backup/Restore */}
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-white">Backup Data</p>
+                  <p className="text-white">Clear Notification Logs</p>
                   <p className="text-sm text-bambu-gray">
-                    Export settings, providers, printers, and more
+                    Delete notification logs older than 30 days
                   </p>
                 </div>
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => setShowBackupModal(true)}
+                  onClick={() => setShowClearLogsConfirm(true)}
                 >
-                  <Download className="w-4 h-4" />
-                  Export
+                  <Trash2 className="w-4 h-4" />
+                  Clear
                 </Button>
-              </div>
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-white">Restore Backup</p>
-                  <p className="text-sm text-bambu-gray">
-                    Import settings from a backup file with duplicate handling options
-                  </p>
-                </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => setShowRestoreModal(true)}
-                >
-                  <Upload className="w-4 h-4" />
-                  Restore
-                </Button>
-              </div>
-
-              <div className="border-t border-bambu-dark-tertiary pt-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-white">Clear Notification Logs</p>
-                    <p className="text-sm text-bambu-gray">
-                      Delete notification logs older than 30 days
-                    </p>
-                  </div>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => setShowClearLogsConfirm(true)}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                    Clear
-                  </Button>
-                </div>
               </div>
               <div className="flex items-center justify-between">
                 <div>
@@ -1320,6 +1464,22 @@ export function SettingsPage() {
                 >
                   <Trash2 className="w-4 h-4" />
                   Reset
+                </Button>
+              </div>
+              <div className="flex items-center justify-between pt-4 border-t border-bambu-dark-tertiary">
+                <div>
+                  <p className="text-white">Backup & Restore</p>
+                  <p className="text-sm text-bambu-gray">
+                    Export/import settings and configure GitHub backup
+                  </p>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => handleTabChange('backup')}
+                >
+                  <Database className="w-4 h-4" />
+                  Go to Backup
                 </Button>
               </div>
             </CardContent>
@@ -1713,6 +1873,72 @@ export function SettingsPage() {
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Third Column - Prometheus Metrics */}
+        <div className="flex-1 lg:max-w-md space-y-4">
+          <Card>
+            <CardHeader>
+              <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                <TrendingUp className="w-5 h-5 text-orange-400" />
+                Prometheus Metrics
+              </h2>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-bambu-gray">
+                Expose printer metrics at <code className="bg-bambu-dark px-1 rounded">/api/v1/metrics</code> for Prometheus/Grafana monitoring.
+              </p>
+
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-white">Enable Metrics Endpoint</p>
+                  <p className="text-xs text-bambu-gray">Expose printer data in Prometheus format</p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={localSettings.prometheus_enabled ?? false}
+                    onChange={(e) => updateSetting('prometheus_enabled', e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
+                </label>
+              </div>
+
+              {localSettings.prometheus_enabled && (
+                <div className="space-y-4 pt-2 border-t border-bambu-dark-tertiary">
+                  <div>
+                    <label className="block text-sm text-bambu-gray mb-1">
+                      Bearer Token (optional)
+                    </label>
+                    <input
+                      type="password"
+                      value={localSettings.prometheus_token ?? ''}
+                      onChange={(e) => updateSetting('prometheus_token', e.target.value)}
+                      placeholder="Leave empty for no authentication"
+                      className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+                    />
+                    <p className="text-xs text-bambu-gray mt-1">
+                      If set, requests must include <code className="bg-bambu-dark px-1 rounded">Authorization: Bearer &lt;token&gt;</code>
+                    </p>
+                  </div>
+
+                  <div className="pt-2 border-t border-bambu-dark-tertiary">
+                    <p className="text-sm text-white mb-2">Available Metrics</p>
+                    <div className="text-xs text-bambu-gray space-y-1">
+                      <p><code className="text-orange-400">bambuddy_printer_connected</code> - Connection status</p>
+                      <p><code className="text-orange-400">bambuddy_printer_state</code> - Printer state (idle/printing/etc)</p>
+                      <p><code className="text-orange-400">bambuddy_print_progress</code> - Print progress 0-100%</p>
+                      <p><code className="text-orange-400">bambuddy_bed_temp_celsius</code> - Bed temperature</p>
+                      <p><code className="text-orange-400">bambuddy_nozzle_temp_celsius</code> - Nozzle temperature</p>
+                      <p><code className="text-orange-400">bambuddy_prints_total</code> - Total prints by result</p>
+                      <p className="text-bambu-gray/70 italic">...and more (layers, fans, queue, filament usage)</p>
+                    </div>
+                  </div>
                 </div>
               )}
             </CardContent>
@@ -2741,156 +2967,6 @@ export function SettingsPage() {
         />
       )}
 
-      {/* Backup Modal */}
-      {showBackupModal && (
-        <BackupModal
-          onClose={() => setShowBackupModal(false)}
-          onExport={async (categories) => {
-            setShowBackupModal(false);
-            const toastId = 'backup-progress';
-            const includesArchives = categories.archives;
-
-            // Show persistent loading toast for archive backups (can be large)
-            if (includesArchives) {
-              showPersistentToast(toastId, t('backup.preparing', { defaultValue: 'Preparing backup...' }), 'loading');
-            }
-
-            try {
-              const { blob, filename } = await api.exportBackup(categories);
-
-              // Dismiss loading toast before download starts
-              if (includesArchives) {
-                dismissToast(toastId);
-              }
-
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = filename;
-              a.click();
-              URL.revokeObjectURL(url);
-              showToast(t('backup.downloaded', { defaultValue: 'Backup downloaded' }), 'success');
-            } catch {
-              // Dismiss loading toast on error
-              if (includesArchives) {
-                dismissToast(toastId);
-              }
-              showToast(t('backup.failed', { defaultValue: 'Failed to create backup' }), 'error');
-            }
-          }}
-        />
-      )}
-
-      {/* Restore Modal */}
-      {showRestoreModal && (
-        <RestoreModal
-          onClose={() => setShowRestoreModal(false)}
-          onRestore={async (file, overwrite) => {
-            return await api.importBackup(file, overwrite);
-          }}
-          onSuccess={() => {
-            // Reset local settings to force re-sync from restored data
-            setLocalSettings(null);
-            isInitialLoadRef.current = true;
-            // Use resetQueries to clear cached data completely
-            // This ensures fresh data is fetched, not stale cache
-            queryClient.resetQueries({ queryKey: ['settings'] });
-            // Invalidate other queries that may have changed
-            queryClient.invalidateQueries({ queryKey: ['notification-providers'] });
-            queryClient.invalidateQueries({ queryKey: ['notification-templates'] });
-            queryClient.invalidateQueries({ queryKey: ['smart-plugs'] });
-            queryClient.invalidateQueries({ queryKey: ['external-links'] });
-            queryClient.invalidateQueries({ queryKey: ['printers'] });
-            queryClient.invalidateQueries({ queryKey: ['filaments'] });
-            queryClient.invalidateQueries({ queryKey: ['maintenance-types'] });
-            queryClient.invalidateQueries({ queryKey: ['api-keys'] });
-          }}
-        />
-      )}
-
-      {/* Telemetry Info Modal */}
-      {showTelemetryInfo && (
-        <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-          onClick={() => setShowTelemetryInfo(false)}
-        >
-          <Card className="w-full max-w-lg" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
-            <CardHeader className="flex flex-row items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Shield className="w-5 h-5 text-bambu-green" />
-                <h2 className="text-lg font-semibold text-white">{t('settings.telemetryInfoTitle')}</h2>
-              </div>
-              <button
-                onClick={() => setShowTelemetryInfo(false)}
-                className="p-1 rounded hover:bg-bambu-dark-tertiary text-bambu-gray hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-bambu-gray text-sm">
-                {t('settings.telemetryInfoIntro')}
-              </p>
-
-              <div className="space-y-3">
-                <h3 className="text-white font-medium">{t('settings.telemetryInfoCollected')}</h3>
-                <ul className="space-y-2 text-sm">
-                  <li className="flex items-start gap-2 text-bambu-gray">
-                    <CheckCircle className="w-4 h-4 text-bambu-green mt-0.5 shrink-0" />
-                    <span>{t('settings.telemetryInfoItem1')}</span>
-                  </li>
-                  <li className="flex items-start gap-2 text-bambu-gray">
-                    <CheckCircle className="w-4 h-4 text-bambu-green mt-0.5 shrink-0" />
-                    <span>{t('settings.telemetryInfoItem2')}</span>
-                  </li>
-                  <li className="flex items-start gap-2 text-bambu-gray">
-                    <CheckCircle className="w-4 h-4 text-bambu-green mt-0.5 shrink-0" />
-                    <span>{t('settings.telemetryInfoItem3')}</span>
-                  </li>
-                  <li className="flex items-start gap-2 text-bambu-gray">
-                    <CheckCircle className="w-4 h-4 text-bambu-green mt-0.5 shrink-0" />
-                    <span>{t('settings.telemetryInfoItem4')}</span>
-                  </li>
-                </ul>
-              </div>
-
-              <div className="space-y-3">
-                <h3 className="text-white font-medium">{t('settings.telemetryInfoNotCollected')}</h3>
-                <ul className="space-y-2 text-sm">
-                  <li className="flex items-start gap-2 text-bambu-gray">
-                    <XCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
-                    <span>{t('settings.telemetryInfoNotItem1')}</span>
-                  </li>
-                  <li className="flex items-start gap-2 text-bambu-gray">
-                    <XCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
-                    <span>{t('settings.telemetryInfoNotItem2')}</span>
-                  </li>
-                  <li className="flex items-start gap-2 text-bambu-gray">
-                    <XCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
-                    <span>{t('settings.telemetryInfoNotItem3')}</span>
-                  </li>
-                  <li className="flex items-start gap-2 text-bambu-gray">
-                    <XCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
-                    <span>{t('settings.telemetryInfoNotItem4')}</span>
-                  </li>
-                </ul>
-              </div>
-
-              <p className="text-bambu-gray text-xs border-t border-bambu-dark-tertiary pt-4">
-                {t('settings.telemetryInfoFooter')}
-              </p>
-
-              <Button
-                onClick={() => setShowTelemetryInfo(false)}
-                className="w-full"
-              >
-                {t('common.close')}
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-
       {/* Release Notes Modal */}
       {showReleaseNotes && updateCheck?.release_notes && (
         <div
@@ -3142,6 +3218,11 @@ export function SettingsPage() {
             </div>
           )}
         </div>
+      )}
+
+      {/* Backup Tab */}
+      {activeTab === 'backup' && (
+        <GitHubBackupSettings />
       )}
 
       {/* Disable Authentication Confirmation Modal */}

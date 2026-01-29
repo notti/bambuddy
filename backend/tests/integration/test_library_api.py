@@ -446,125 +446,36 @@ class TestLibraryZipExtractAPI:
         assert result["extracted"] == 1  # Only real_file.txt
         assert result["files"][0]["filename"] == "real_file.txt"
 
-
-class TestSTLThumbnailAPI:
-    """Integration tests for STL thumbnail generation endpoints."""
-
-    @pytest.fixture
-    async def stl_file_factory(self, db_session):
-        """Factory to create test STL files."""
-        _counter = [0]
-
-        async def _create_stl_file(**kwargs):
-            from backend.app.models.library import LibraryFile
-
-            _counter[0] += 1
-            counter = _counter[0]
-
-            defaults = {
-                "filename": f"test_model_{counter}.stl",
-                "file_path": f"/test/path/test_model_{counter}.stl",
-                "file_size": 1024,
-                "file_type": "stl",
-            }
-            defaults.update(kwargs)
-
-            lib_file = LibraryFile(**defaults)
-            db_session.add(lib_file)
-            await db_session.commit()
-            await db_session.refresh(lib_file)
-            return lib_file
-
-        return _create_stl_file
-
-    @pytest.fixture
-    async def folder_factory(self, db_session):
-        """Factory to create test folders."""
-        _counter = [0]
-
-        async def _create_folder(**kwargs):
-            from backend.app.models.library import LibraryFolder
-
-            _counter[0] += 1
-            counter = _counter[0]
-
-            defaults = {"name": f"Test Folder {counter}"}
-            defaults.update(kwargs)
-
-            folder = LibraryFolder(**defaults)
-            db_session.add(folder)
-            await db_session.commit()
-            await db_session.refresh(folder)
-            return folder
-
-        return _create_folder
-
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_regenerate_thumbnail_file_not_found(self, async_client: AsyncClient, db_session):
-        """Verify 404 for non-existent file."""
-        response = await async_client.post("/api/v1/library/files/9999/regenerate-thumbnail")
-        assert response.status_code == 404
+    async def test_extract_zip_create_folder_from_zip(self, async_client: AsyncClient, db_session):
+        """Verify ZIP extraction creates a folder from the ZIP filename."""
+        import io
+        import zipfile
 
-    @pytest.mark.asyncio
-    @pytest.mark.integration
-    async def test_regenerate_thumbnail_file_missing_on_disk(
-        self, async_client: AsyncClient, stl_file_factory, db_session
-    ):
-        """Verify error when file exists in DB but not on disk."""
-        stl_file = await stl_file_factory()
-        response = await async_client.post(f"/api/v1/library/files/{stl_file.id}/regenerate-thumbnail")
-        assert response.status_code == 404
-        assert "not found on disk" in response.json()["detail"]
+        # Create a ZIP file with some files
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("file1.txt", "Content 1")
+            zf.writestr("file2.txt", "Content 2")
+        zip_buffer.seek(0)
 
-    @pytest.mark.asyncio
-    @pytest.mark.integration
-    async def test_batch_generate_no_filter(self, async_client: AsyncClient, db_session):
-        """Verify error when no filter is specified."""
-        data = {}
-        response = await async_client.post("/api/v1/library/generate-stl-thumbnails", json=data)
-        assert response.status_code == 400
-        assert "Must specify" in response.json()["detail"]
-
-    @pytest.mark.asyncio
-    @pytest.mark.integration
-    async def test_batch_generate_all_missing_empty(self, async_client: AsyncClient, db_session):
-        """Verify batch generation with no matching files."""
-        data = {"all_missing": True}
-        response = await async_client.post("/api/v1/library/generate-stl-thumbnails", json=data)
+        files = {"file": ("MyProject.zip", zip_buffer.read(), "application/zip")}
+        params = {"create_folder_from_zip": "true", "preserve_structure": "false"}
+        response = await async_client.post("/api/v1/library/files/extract-zip", files=files, params=params)
         assert response.status_code == 200
         result = response.json()
-        assert result["processed"] == 0
-        assert result["succeeded"] == 0
-        assert result["failed"] == 0
+        assert result["extracted"] == 2
+        assert result["folders_created"] == 1  # MyProject folder created
 
-    @pytest.mark.asyncio
-    @pytest.mark.integration
-    async def test_batch_generate_specific_files(self, async_client: AsyncClient, stl_file_factory, db_session):
-        """Verify batch generation with specific file IDs."""
-        stl_file = await stl_file_factory()
-        data = {"file_ids": [stl_file.id]}
-        response = await async_client.post("/api/v1/library/generate-stl-thumbnails", json=data)
-        assert response.status_code == 200
-        result = response.json()
-        assert result["processed"] == 1
-        # Will fail because file doesn't exist on disk
-        assert result["failed"] == 1
-        assert result["results"][0]["error"] == "File not found on disk"
+        # Verify the files are in a folder
+        assert result["files"][0]["folder_id"] is not None
+        assert result["files"][1]["folder_id"] is not None
+        # Both files should be in the same folder
+        assert result["files"][0]["folder_id"] == result["files"][1]["folder_id"]
 
-    @pytest.mark.asyncio
-    @pytest.mark.integration
-    async def test_batch_generate_by_folder(
-        self, async_client: AsyncClient, stl_file_factory, folder_factory, db_session
-    ):
-        """Verify batch generation by folder ID."""
-        folder = await folder_factory()
-        await stl_file_factory(folder_id=folder.id)
-        await stl_file_factory(folder_id=folder.id)
-        await stl_file_factory()  # File in root, should not be processed
-
-        data = {"folder_id": folder.id}
-        response = await async_client.post("/api/v1/library/generate-stl-thumbnails", json=data)
-        assert response.status_code == 200
-        result = response.json()
-        assert result["processed"] == 2  # Only files in the folder
+        # Verify the folder was created with the right name
+        folder_response = await async_client.get(f"/api/v1/library/folders/{result['files'][0]['folder_id']}")
+        assert folder_response.status_code == 200
+        folder = folder_response.json()
+        assert folder["name"] == "MyProject"

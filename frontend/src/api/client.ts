@@ -65,6 +65,11 @@ export interface Printer {
   nozzle_count: number;  // 1 or 2, auto-detected from MQTT
   is_active: boolean;
   auto_archive: boolean;
+  external_camera_url: string | null;
+  external_camera_type: string | null;  // "mjpeg", "rtsp", "snapshot"
+  external_camera_enabled: boolean;
+  plate_detection_enabled: boolean;  // Check plate before print
+  plate_detection_roi?: PlateDetectionROI;  // ROI for plate detection
   created_at: string;
   updated_at: string;
 }
@@ -209,6 +214,54 @@ export interface PrinterCreate {
   model?: string;
   location?: string;
   auto_archive?: boolean;
+  external_camera_url?: string | null;
+  external_camera_type?: string | null;
+  external_camera_enabled?: boolean;
+  plate_detection_enabled?: boolean;
+  plate_detection_roi?: PlateDetectionROI;
+}
+
+// Plate Detection
+export interface PlateDetectionROI {
+  x: number;  // X start % (0.0-1.0)
+  y: number;  // Y start % (0.0-1.0)
+  w: number;  // Width % (0.0-1.0)
+  h: number;  // Height % (0.0-1.0)
+}
+
+export interface PlateDetectionResult {
+  is_empty: boolean;
+  confidence: number;
+  difference_percent: number;
+  message: string;
+  has_debug_image: boolean;
+  debug_image_url?: string;
+  needs_calibration: boolean;
+  light_warning?: boolean;
+  reference_count?: number;
+  max_references?: number;
+  roi?: PlateDetectionROI;
+}
+
+export interface PlateDetectionStatus {
+  available: boolean;
+  calibrated: boolean;
+  reference_count: number;
+  max_references: number;
+  message: string;
+}
+
+export interface CalibrationResult {
+  success: boolean;
+  message: string;
+}
+
+export interface PlateReference {
+  index: number;
+  label: string;
+  timestamp: string;
+  has_image: boolean;
+  thumbnail_url: string;
 }
 
 // Archive types
@@ -253,6 +306,7 @@ export interface Archive {
   extra_data: Record<string, unknown> | null;
   makerworld_url: string | null;
   designer: string | null;
+  external_url: string | null;
   is_favorite: boolean;
   tags: string | null;
   notes: string | null;
@@ -523,6 +577,53 @@ export interface BOMItemUpdate {
   remarks?: string;
 }
 
+// Project Export/Import Types
+export interface BOMItemExport {
+  name: string;
+  quantity_needed: number;
+  quantity_acquired: number;
+  unit_price: number | null;
+  sourcing_url: string | null;
+  stl_filename: string | null;
+  remarks: string | null;
+}
+
+export interface LinkedFolderExport {
+  name: string;
+}
+
+export interface ProjectExport {
+  name: string;
+  description: string | null;
+  color: string | null;
+  status: string;
+  target_count: number | null;
+  target_parts_count: number | null;
+  notes: string | null;
+  tags: string | null;
+  due_date: string | null;
+  priority: string;
+  budget: number | null;
+  bom_items: BOMItemExport[];
+  linked_folders: LinkedFolderExport[];
+}
+
+export interface ProjectImport {
+  name: string;
+  description?: string;
+  color?: string;
+  status?: string;
+  target_count?: number;
+  target_parts_count?: number;
+  notes?: string;
+  tags?: string;
+  due_date?: string;
+  priority?: string;
+  budget?: number;
+  bom_items?: BOMItemExport[];
+  linked_folders?: LinkedFolderExport[];
+}
+
 // Timeline Types
 export interface TimelineEvent {
   event_type: string;
@@ -580,6 +681,7 @@ export interface AppSettings {
   energy_cost_per_kwh: number;
   energy_tracking_mode: 'print' | 'total';
   check_updates: boolean;
+  check_printer_firmware: boolean;
   notification_language: string;
   // AMS threshold settings
   ams_humidity_good: number;  // <= this is green
@@ -594,8 +696,6 @@ export interface AppSettings {
   time_format: 'system' | '12h' | '24h';
   // Default printer
   default_printer_id: number | null;
-  // Telemetry
-  telemetry_enabled: boolean;
   // Dark mode theme settings
   dark_style: 'classic' | 'glow' | 'vibrant';
   dark_background: 'neutral' | 'warm' | 'cool' | 'oled' | 'slate' | 'forest';
@@ -628,6 +728,9 @@ export interface AppSettings {
   library_disk_warning_gb: number;
   // Camera view settings
   camera_view_mode: 'window' | 'embedded';
+  // Prometheus metrics
+  prometheus_enabled: boolean;
+  prometheus_token: string;
 }
 
 export type AppSettingsUpdate = Partial<AppSettings>;
@@ -966,6 +1069,28 @@ export interface PrintQueueItemUpdate {
   use_ams?: boolean;
 }
 
+export interface PrintQueueBulkUpdate {
+  item_ids: number[];
+  printer_id?: number | null;
+  scheduled_time?: string | null;
+  require_previous_success?: boolean;
+  auto_off_after?: boolean;
+  manual_start?: boolean;
+  // Print options
+  bed_levelling?: boolean;
+  flow_cali?: boolean;
+  vibration_cali?: boolean;
+  layer_inspect?: boolean;
+  timelapse?: boolean;
+  use_ams?: boolean;
+}
+
+export interface PrintQueueBulkUpdateResponse {
+  updated_count: number;
+  skipped_count: number;
+  message: string;
+}
+
 // MQTT Logging types
 export interface MQTTLogEntry {
   timestamp: string;
@@ -1085,6 +1210,8 @@ export interface NotificationProvider {
   // AMS-HT environmental alarms
   on_ams_ht_humidity_high: boolean;
   on_ams_ht_temperature_high: boolean;
+  // Build plate detection
+  on_plate_not_empty: boolean;
   // Quiet hours
   quiet_hours_enabled: boolean;
   quiet_hours_start: string | null;
@@ -1125,6 +1252,8 @@ export interface NotificationProviderCreate {
   // AMS-HT environmental alarms
   on_ams_ht_humidity_high?: boolean;
   on_ams_ht_temperature_high?: boolean;
+  // Build plate detection
+  on_plate_not_empty?: boolean;
   // Quiet hours
   quiet_hours_enabled?: boolean;
   quiet_hours_start?: string | null;
@@ -1158,6 +1287,8 @@ export interface NotificationProviderUpdate {
   // AMS-HT environmental alarms
   on_ams_ht_humidity_high?: boolean;
   on_ams_ht_temperature_high?: boolean;
+  // Build plate detection
+  on_plate_not_empty?: boolean;
   // Quiet hours
   quiet_hours_enabled?: boolean;
   quiet_hours_start?: string | null;
@@ -1167,6 +1298,78 @@ export interface NotificationProviderUpdate {
   daily_digest_time?: string | null;
   // Printer filter
   printer_id?: number | null;
+}
+
+// GitHub Backup types
+export type ScheduleType = 'hourly' | 'daily' | 'weekly';
+
+export interface GitHubBackupConfig {
+  id: number;
+  repository_url: string;
+  has_token: boolean;
+  branch: string;
+  schedule_enabled: boolean;
+  schedule_type: ScheduleType;
+  backup_kprofiles: boolean;
+  backup_cloud_profiles: boolean;
+  backup_settings: boolean;
+  enabled: boolean;
+  last_backup_at: string | null;
+  last_backup_status: string | null;
+  last_backup_message: string | null;
+  last_backup_commit_sha: string | null;
+  next_scheduled_run: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GitHubBackupConfigCreate {
+  repository_url: string;
+  access_token: string;
+  branch?: string;
+  schedule_enabled?: boolean;
+  schedule_type?: ScheduleType;
+  backup_kprofiles?: boolean;
+  backup_cloud_profiles?: boolean;
+  backup_settings?: boolean;
+  enabled?: boolean;
+}
+
+export interface GitHubBackupLog {
+  id: number;
+  config_id: number;
+  started_at: string;
+  completed_at: string | null;
+  status: string;
+  trigger: string;
+  commit_sha: string | null;
+  files_changed: number;
+  error_message: string | null;
+}
+
+export interface GitHubBackupStatus {
+  configured: boolean;
+  enabled: boolean;
+  is_running: boolean;
+  progress: string | null;
+  last_backup_at: string | null;
+  last_backup_status: string | null;
+  next_scheduled_run: string | null;
+}
+
+export interface GitHubTestConnectionResponse {
+  success: boolean;
+  message: string;
+  repo_name: string | null;
+  permissions: Record<string, boolean> | null;
+}
+
+export interface GitHubBackupTriggerResponse {
+  success: boolean;
+  message: string;
+  log_id: number | null;
+  commit_sha: string | null;
+  files_changed: number;
 }
 
 export interface NotificationTestRequest {
@@ -1548,6 +1751,11 @@ export const api = {
     request<{ connected: boolean }>(`/printers/${id}/disconnect`, {
       method: 'POST',
     }),
+  testExternalCamera: (printerId: number, url: string, cameraType: string) =>
+    request<{ success: boolean; error?: string; resolution?: string }>(
+      `/printers/${printerId}/camera/external/test?url=${encodeURIComponent(url)}&camera_type=${encodeURIComponent(cameraType)}`,
+      { method: 'POST' }
+    ),
 
   // Print Control
   stopPrint: (printerId: number) =>
@@ -1625,6 +1833,18 @@ export const api = {
     }>(`/printers/${printerId}/files?path=${encodeURIComponent(path)}`),
   getPrinterFileDownloadUrl: (printerId: number, path: string) =>
     `${API_BASE}/printers/${printerId}/files/download?path=${encodeURIComponent(path)}`,
+  downloadPrinterFilesAsZip: async (printerId: number, paths: string[]): Promise<Blob> => {
+    const response = await fetch(`${API_BASE}/printers/${printerId}/files/download-zip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    return response.blob();
+  },
   deletePrinterFile: (printerId: number, path: string) =>
     request<{ status: string; path: string }>(`/printers/${printerId}/files?path=${encodeURIComponent(path)}`, {
       method: 'DELETE',
@@ -1670,6 +1890,7 @@ export const api = {
     failure_reason?: string | null;
     status?: string;
     quantity?: number;
+    external_url?: string | null;
   }) =>
     request<Archive>(`/archives/${id}`, {
       method: 'PATCH',
@@ -1680,6 +1901,8 @@ export const api = {
   deleteArchive: (id: number) =>
     request<void>(`/archives/${id}`, { method: 'DELETE' }),
   getArchiveStats: () => request<ArchiveStats>('/archives/stats'),
+  recalculateCosts: () =>
+    request<{ message: string; updated: number }>('/archives/recalculate-costs', { method: 'POST' }),
   getFailureAnalysis: (options?: { days?: number; printerId?: number; projectId?: number }) => {
     const params = new URLSearchParams();
     if (options?.days) params.set('days', String(options.days));
@@ -1762,6 +1985,8 @@ export const api = {
       method: 'POST',
     }),
   getArchiveThumbnail: (id: number) => `${API_BASE}/archives/${id}/thumbnail?v=${Date.now()}`,
+  getArchivePlateThumbnail: (id: number, plateIndex: number) =>
+    `${API_BASE}/archives/${id}/plate-thumbnail/${plateIndex}`,
   getArchiveDownload: (id: number) => `${API_BASE}/archives/${id}/download`,
   getArchiveGcode: (id: number) => `${API_BASE}/archives/${id}/gcode`,
   getArchivePlatePreview: (id: number) => `${API_BASE}/archives/${id}/plate-preview`,
@@ -2067,6 +2292,7 @@ export const api = {
       if (categories.smart_plugs !== undefined) params.set('include_smart_plugs', String(categories.smart_plugs));
       if (categories.external_links !== undefined) params.set('include_external_links', String(categories.external_links));
       if (categories.printers !== undefined) params.set('include_printers', String(categories.printers));
+      if (categories.plate_calibration !== undefined) params.set('include_plate_calibration', String(categories.plate_calibration));
       if (categories.filaments !== undefined) params.set('include_filaments', String(categories.filaments));
       if (categories.maintenance !== undefined) params.set('include_maintenance', String(categories.maintenance));
       if (categories.archives !== undefined) params.set('include_archives', String(categories.archives));
@@ -2249,6 +2475,11 @@ export const api = {
     request<{ message: string }>(`/queue/${id}/stop`, { method: 'POST' }),
   startQueueItem: (id: number) =>
     request<PrintQueueItem>(`/queue/${id}/start`, { method: 'POST' }),
+  bulkUpdateQueue: (data: PrintQueueBulkUpdate) =>
+    request<PrintQueueBulkUpdateResponse>('/queue/bulk', {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
 
   // K-Profiles
   getKProfiles: (printerId: number, nozzleDiameter = '0.4') =>
@@ -2524,6 +2755,59 @@ export const api = {
   testCameraConnection: (printerId: number) =>
     request<{ success: boolean; message?: string; error?: string }>(`/printers/${printerId}/camera/test`),
 
+  // Plate Detection - Multi-reference calibration (stores up to 5 references per printer)
+  checkPlateEmpty: (printerId: number, options?: { useExternal?: boolean; includeDebugImage?: boolean }) => {
+    const params = new URLSearchParams();
+    params.set('use_external', String(options?.useExternal ?? false));
+    params.set('include_debug_image', String(options?.includeDebugImage ?? false));
+    return request<PlateDetectionResult>(
+      `/printers/${printerId}/camera/check-plate?${params.toString()}`
+    );
+  },
+  getPlateDetectionStatus: (printerId: number) => {
+    return request<PlateDetectionStatus & { chamber_light?: boolean }>(
+      `/printers/${printerId}/camera/plate-detection/status`
+    );
+  },
+  calibratePlateDetection: (printerId: number, options?: { label?: string; useExternal?: boolean }) => {
+    const params = new URLSearchParams();
+    if (options?.label) params.set('label', options.label);
+    params.set('use_external', String(options?.useExternal ?? false));
+    return request<CalibrationResult & { index: number }>(
+      `/printers/${printerId}/camera/plate-detection/calibrate?${params.toString()}`,
+      { method: 'POST' }
+    );
+  },
+  deletePlateCalibration: (printerId: number) => {
+    return request<CalibrationResult>(
+      `/printers/${printerId}/camera/plate-detection/calibrate`,
+      { method: 'DELETE' }
+    );
+  },
+  getPlateReferences: (printerId: number) => {
+    return request<{
+      references: PlateReference[];
+      max_references: number;
+    }>(`/printers/${printerId}/camera/plate-detection/references`);
+  },
+  getPlateReferenceThumbnailUrl: (printerId: number, index: number) => {
+    return `${API_BASE}/printers/${printerId}/camera/plate-detection/references/${index}/thumbnail`;
+  },
+  updatePlateReferenceLabel: (printerId: number, index: number, label: string) => {
+    const params = new URLSearchParams();
+    params.set('label', label);
+    return request<{ success: boolean; index: number; label: string }>(
+      `/printers/${printerId}/camera/plate-detection/references/${index}?${params.toString()}`,
+      { method: 'PUT' }
+    );
+  },
+  deletePlateReference: (printerId: number, index: number) => {
+    return request<{ success: boolean; message: string }>(
+      `/printers/${printerId}/camera/plate-detection/references/${index}`,
+      { method: 'DELETE' }
+    );
+  },
+
   // External Links
   getExternalLinks: () => request<ExternalLink[]>('/external-links/'),
   getExternalLink: (id: number) => request<ExternalLink>(`/external-links/${id}`),
@@ -2656,6 +2940,15 @@ export const api = {
   getProjectTimeline: (projectId: number, limit = 50) =>
     request<TimelineEvent[]>(`/projects/${projectId}/timeline?limit=${limit}`),
 
+  // Project Export/Import
+  exportProjectJson: (projectId: number) =>
+    request<ProjectExport>(`/projects/${projectId}/export?format=json`),
+  importProject: (data: ProjectImport) =>
+    request<Project>('/projects/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
   // API Keys
   getAPIKeys: () => request<APIKey[]>('/api-keys/'),
   createAPIKey: (data: APIKeyCreate) =>
@@ -2723,13 +3016,15 @@ export const api = {
   extractZipFile: async (
     file: File,
     folderId?: number | null,
-    preserveStructure: boolean = true
+    preserveStructure: boolean = true,
+    createFolderFromZip: boolean = false
   ): Promise<ZipExtractResponse> => {
     const formData = new FormData();
     formData.append('file', file);
     const params = new URLSearchParams();
     if (folderId) params.set('folder_id', String(folderId));
     params.set('preserve_structure', String(preserveStructure));
+    params.set('create_folder_from_zip', String(createFolderFromZip));
     const response = await fetch(`${API_BASE}/library/files/extract-zip?${params}`, {
       method: 'POST',
       body: formData,
@@ -2749,6 +3044,8 @@ export const api = {
     request<{ status: string; message: string }>(`/library/files/${id}`, { method: 'DELETE' }),
   getLibraryFileDownloadUrl: (id: number) => `${API_BASE}/library/files/${id}/download`,
   getLibraryFileThumbnailUrl: (id: number) => `${API_BASE}/library/files/${id}/thumbnail`,
+  getLibraryFilePlateThumbnail: (id: number, plateIndex: number) =>
+    `${API_BASE}/library/files/${id}/plate-thumbnail/${plateIndex}`,
   getLibraryFileGcodeUrl: (id: number) => `${API_BASE}/library/files/${id}/gcode`,
   moveLibraryFiles: (fileIds: number[], folderId: number | null) =>
     request<{ status: string; moved: number }>('/library/files/move', {
@@ -2822,20 +3119,45 @@ export const api = {
       }>;
     }>(`/library/files/${fileId}/filament-requirements${plateId !== undefined ? `?plate_id=${plateId}` : ''}`),
 
-  // STL Thumbnail Generation
-  regenerateFileThumbnail: (fileId: number) =>
-    request<LibraryFile>(`/library/files/${fileId}/regenerate-thumbnail`, {
+  // GitHub Backup
+  getGitHubBackupConfig: () =>
+    request<GitHubBackupConfig | null>('/github-backup/config'),
+
+  saveGitHubBackupConfig: (config: GitHubBackupConfigCreate) =>
+    request<GitHubBackupConfig>('/github-backup/config', {
       method: 'POST',
+      body: JSON.stringify(config),
     }),
-  batchGenerateStlThumbnails: (options: {
-    file_ids?: number[];
-    folder_id?: number;
-    all_missing?: boolean;
-  }) =>
-    request<BatchThumbnailResponse>('/library/generate-stl-thumbnails', {
-      method: 'POST',
-      body: JSON.stringify(options),
+
+  updateGitHubBackupConfig: (config: Partial<GitHubBackupConfigCreate>) =>
+    request<GitHubBackupConfig>('/github-backup/config', {
+      method: 'PATCH',
+      body: JSON.stringify(config),
     }),
+
+  deleteGitHubBackupConfig: () =>
+    request<{ message: string }>('/github-backup/config', { method: 'DELETE' }),
+
+  testGitHubConnection: (repoUrl: string, token: string) =>
+    request<GitHubTestConnectionResponse>(
+      `/github-backup/test?repo_url=${encodeURIComponent(repoUrl)}&token=${encodeURIComponent(token)}`,
+      { method: 'POST' }
+    ),
+
+  testGitHubStoredConnection: () =>
+    request<GitHubTestConnectionResponse>('/github-backup/test-stored', { method: 'POST' }),
+
+  triggerGitHubBackup: () =>
+    request<GitHubBackupTriggerResponse>('/github-backup/run', { method: 'POST' }),
+
+  getGitHubBackupStatus: () =>
+    request<GitHubBackupStatus>('/github-backup/status'),
+
+  getGitHubBackupLogs: (limit: number = 50) =>
+    request<GitHubBackupLog[]>(`/github-backup/logs?limit=${limit}`),
+
+  clearGitHubBackupLogs: (keepLast: number = 10) =>
+    request<{ deleted: number; message: string }>(`/github-backup/logs?keep_last=${keepLast}`, { method: 'DELETE' }),
 };
 
 // AMS History types

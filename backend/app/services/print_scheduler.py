@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.config import settings
 from backend.app.core.database import async_session
 from backend.app.models.archive import PrintArchive
+from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
 from backend.app.models.smart_plug import SmartPlug
@@ -126,8 +127,9 @@ class PrintScheduler:
         if not state:
             return False
 
-        # Printer is idle if state is IDLE or FINISH
-        return state.state in ("IDLE", "FINISH", "unknown")
+        # Printer is idle if state is IDLE, FINISH, FAILED, or unknown
+        # FAILED means previous print failed, printer is ready for new print
+        return state.state in ("IDLE", "FINISH", "FAILED", "unknown")
 
     async def _get_smart_plug(self, db: AsyncSession, printer_id: int) -> SmartPlug | None:
         """Get the smart plug associated with a printer."""
@@ -219,22 +221,15 @@ class PrintScheduler:
             await tasmota_service.turn_off(plug)
 
     async def _start_print(self, db: AsyncSession, item: PrintQueueItem):
-        """Upload file and start print for a queue item."""
+        """Upload file and start print for a queue item.
+
+        Supports two sources:
+        - archive_id: Print from an existing archive
+        - library_file_id: Print from a library file (file manager)
+        """
         logger.info(f"Starting queue item {item.id}")
 
-        # Get archive
-        result = await db.execute(select(PrintArchive).where(PrintArchive.id == item.archive_id))
-        archive = result.scalar_one_or_none()
-        if not archive:
-            item.status = "failed"
-            item.error_message = "Archive not found"
-            item.completed_at = datetime.utcnow()
-            await db.commit()
-            logger.error(f"Queue item {item.id}: Archive {item.archive_id} not found")
-            await self._power_off_if_needed(db, item)
-            return
-
-        # Get printer
+        # Get printer first (needed for both paths)
         result = await db.execute(select(Printer).where(Printer.id == item.printer_id))
         printer = result.scalar_one_or_none()
         if not printer:
@@ -256,11 +251,60 @@ class PrintScheduler:
             await self._power_off_if_needed(db, item)
             return
 
-        # Get file path
-        file_path = settings.base_dir / archive.file_path
+        # Determine source: archive or library file
+        archive = None
+        library_file = None
+        file_path = None
+        filename = None
+
+        if item.archive_id:
+            # Print from archive
+            result = await db.execute(select(PrintArchive).where(PrintArchive.id == item.archive_id))
+            archive = result.scalar_one_or_none()
+            if not archive:
+                item.status = "failed"
+                item.error_message = "Archive not found"
+                item.completed_at = datetime.utcnow()
+                await db.commit()
+                logger.error(f"Queue item {item.id}: Archive {item.archive_id} not found")
+                await self._power_off_if_needed(db, item)
+                return
+            file_path = settings.base_dir / archive.file_path
+            filename = archive.filename
+
+        elif item.library_file_id:
+            # Print from library file (file manager)
+            result = await db.execute(select(LibraryFile).where(LibraryFile.id == item.library_file_id))
+            library_file = result.scalar_one_or_none()
+            if not library_file:
+                item.status = "failed"
+                item.error_message = "Library file not found"
+                item.completed_at = datetime.utcnow()
+                await db.commit()
+                logger.error(f"Queue item {item.id}: Library file {item.library_file_id} not found")
+                await self._power_off_if_needed(db, item)
+                return
+            # Library files store absolute paths
+            from pathlib import Path
+
+            lib_path = Path(library_file.file_path)
+            file_path = lib_path if lib_path.is_absolute() else settings.base_dir / library_file.file_path
+            filename = library_file.filename
+
+        else:
+            # Neither archive nor library file specified
+            item.status = "failed"
+            item.error_message = "No source file specified"
+            item.completed_at = datetime.utcnow()
+            await db.commit()
+            logger.error(f"Queue item {item.id}: No archive_id or library_file_id specified")
+            await self._power_off_if_needed(db, item)
+            return
+
+        # Check file exists on disk
         if not file_path.exists():
             item.status = "failed"
-            item.error_message = "Archive file not found on disk"
+            item.error_message = "Source file not found on disk"
             item.completed_at = datetime.utcnow()
             await db.commit()
             logger.error(f"Queue item {item.id}: File not found: {file_path}")
@@ -269,7 +313,7 @@ class PrintScheduler:
 
         # Upload file to printer via FTP
         # Use a clean filename to avoid issues with double extensions like .gcode.3mf
-        base_name = archive.filename
+        base_name = filename
         if base_name.endswith(".gcode.3mf"):
             base_name = base_name[:-10]  # Remove .gcode.3mf
         elif base_name.endswith(".3mf"):
@@ -331,9 +375,11 @@ class PrintScheduler:
             return
 
         # Register as expected print so we don't create a duplicate archive
-        from backend.app.main import register_expected_print
+        # Only applicable for archive-based prints
+        if archive:
+            from backend.app.main import register_expected_print
 
-        register_expected_print(item.printer_id, remote_filename, archive.id)
+            register_expected_print(item.printer_id, remote_filename, archive.id)
 
         # Parse AMS mapping if stored
         ams_mapping = None
@@ -363,7 +409,7 @@ class PrintScheduler:
             item.status = "printing"
             item.started_at = datetime.utcnow()
             await db.commit()
-            logger.info(f"Queue item {item.id}: Print started - {archive.filename}")
+            logger.info(f"Queue item {item.id}: Print started - {filename}")
 
             # MQTT relay - publish queue job started
             try:
@@ -371,7 +417,7 @@ class PrintScheduler:
 
                 await mqtt_relay.on_queue_job_started(
                     job_id=item.id,
-                    filename=archive.filename,
+                    filename=filename,
                     printer_id=printer.id,
                     printer_name=printer.name,
                     printer_serial=printer.serial_number,

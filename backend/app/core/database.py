@@ -38,6 +38,7 @@ async def init_db():
         archive,
         external_link,
         filament,
+        github_backup,
         kprofile_note,
         library,
         maintenance,
@@ -285,6 +286,12 @@ async def run_migrations(conn):
         await conn.execute(
             text("ALTER TABLE notification_providers ADD COLUMN on_ams_ht_temperature_high BOOLEAN DEFAULT 0")
         )
+    except Exception:
+        pass
+
+    # Migration: Add plate not empty notification column to notification_providers
+    try:
+        await conn.execute(text("ALTER TABLE notification_providers ADD COLUMN on_plate_not_empty BOOLEAN DEFAULT 1"))
     except Exception:
         pass
 
@@ -675,6 +682,84 @@ async def run_migrations(conn):
     except Exception:
         pass
 
+    # Migration: Add external camera columns to printers
+    try:
+        await conn.execute(text("ALTER TABLE printers ADD COLUMN external_camera_url VARCHAR(500)"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE printers ADD COLUMN external_camera_type VARCHAR(20)"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE printers ADD COLUMN external_camera_enabled BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+
+    # Migration: Add external_url column to print_archives for user-defined links (Printables, etc.)
+    try:
+        await conn.execute(text("ALTER TABLE print_archives ADD COLUMN external_url VARCHAR(500)"))
+    except Exception:
+        pass
+
+    # Migration: Add is_external column to library_files for external cloud files
+    try:
+        await conn.execute(text("ALTER TABLE library_files ADD COLUMN is_external BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+
+    # Migration: Add project_id column to library_files
+    try:
+        await conn.execute(
+            text("ALTER TABLE library_files ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL")
+        )
+    except Exception:
+        pass
+
+    # Migration: Add is_external column to library_folders for external cloud folders
+    try:
+        await conn.execute(text("ALTER TABLE library_folders ADD COLUMN is_external BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+
+    # Migration: Add external folder settings columns to library_folders
+    try:
+        await conn.execute(text("ALTER TABLE library_folders ADD COLUMN external_readonly BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE library_folders ADD COLUMN external_show_hidden BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE library_folders ADD COLUMN external_path VARCHAR(500)"))
+    except Exception:
+        pass
+
+    # Migration: Add plate_detection_enabled column to printers
+    try:
+        await conn.execute(text("ALTER TABLE printers ADD COLUMN plate_detection_enabled BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+
+    # Migration: Add plate detection ROI columns to printers
+    try:
+        await conn.execute(text("ALTER TABLE printers ADD COLUMN plate_detection_roi_x REAL"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE printers ADD COLUMN plate_detection_roi_y REAL"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE printers ADD COLUMN plate_detection_roi_w REAL"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE printers ADD COLUMN plate_detection_roi_h REAL"))
+    except Exception:
+        pass
+
 
 async def seed_notification_templates():
     """Seed default notification templates if they don't exist."""
@@ -683,21 +768,32 @@ async def seed_notification_templates():
     from backend.app.models.notification_template import DEFAULT_TEMPLATES, NotificationTemplate
 
     async with async_session() as session:
-        # Check if templates already exist
-        result = await session.execute(select(NotificationTemplate).limit(1))
-        if result.scalar_one_or_none() is not None:
-            # Templates already seeded
-            return
+        # Get existing template event types
+        result = await session.execute(select(NotificationTemplate.event_type))
+        existing_types = {row[0] for row in result.fetchall()}
 
-        # Insert default templates
-        for template_data in DEFAULT_TEMPLATES:
-            template = NotificationTemplate(
-                event_type=template_data["event_type"],
-                name=template_data["name"],
-                title_template=template_data["title_template"],
-                body_template=template_data["body_template"],
-                is_default=True,
-            )
-            session.add(template)
+        if not existing_types:
+            # No templates exist - insert all defaults
+            for template_data in DEFAULT_TEMPLATES:
+                template = NotificationTemplate(
+                    event_type=template_data["event_type"],
+                    name=template_data["name"],
+                    title_template=template_data["title_template"],
+                    body_template=template_data["body_template"],
+                    is_default=True,
+                )
+                session.add(template)
+        else:
+            # Templates exist - only add missing ones
+            for template_data in DEFAULT_TEMPLATES:
+                if template_data["event_type"] not in existing_types:
+                    template = NotificationTemplate(
+                        event_type=template_data["event_type"],
+                        name=template_data["name"],
+                        title_template=template_data["title_template"],
+                        body_template=template_data["body_template"],
+                        is_default=True,
+                    )
+                    session.add(template)
 
         await session.commit()

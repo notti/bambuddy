@@ -68,6 +68,22 @@ async def create_printer(
     return printer
 
 
+@router.get("/usb-cameras")
+async def list_usb_cameras():
+    """List available USB cameras connected to the system.
+
+    Returns a list of detected V4L2 video devices with their info.
+    Only works on Linux systems with V4L2 support.
+
+    Returns:
+        List of dicts with {device: str, name: str, capabilities: list, formats?: list}
+    """
+    from backend.app.services.external_camera import list_usb_cameras
+
+    cameras = list_usb_cameras()
+    return {"cameras": cameras}
+
+
 @router.get("/{printer_id}", response_model=PrinterResponse)
 async def get_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
     """Get a specific printer."""
@@ -92,6 +108,22 @@ async def update_printer(
         raise HTTPException(404, "Printer not found")
 
     update_data = printer_data.model_dump(exclude_unset=True)
+
+    # Handle nested ROI object - flatten to individual columns
+    if "plate_detection_roi" in update_data:
+        roi = update_data.pop("plate_detection_roi")
+        if roi:
+            update_data["plate_detection_roi_x"] = roi.get("x")
+            update_data["plate_detection_roi_y"] = roi.get("y")
+            update_data["plate_detection_roi_w"] = roi.get("w")
+            update_data["plate_detection_roi_h"] = roi.get("h")
+        else:
+            # Clear ROI if set to null
+            update_data["plate_detection_roi_x"] = None
+            update_data["plate_detection_roi_y"] = None
+            update_data["plate_detection_roi_w"] = None
+            update_data["plate_detection_roi_h"] = None
+
     for field, value in update_data.items():
         setattr(printer, field, value)
 
@@ -376,7 +408,7 @@ async def get_printer_status(printer_id: int, db: AsyncSession = Depends(get_db)
         nozzles=nozzles,
         print_options=print_options,
         stg_cur=state.stg_cur,
-        stg_cur_name=get_derived_status_name(state),
+        stg_cur_name=get_derived_status_name(state, printer.model),
         stg=state.stg,
         airduct_mode=state.airduct_mode,
         speed_level=state.speed_level,
@@ -704,6 +736,50 @@ async def download_printer_file(
         content=data,
         media_type=content_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/{printer_id}/files/download-zip")
+async def download_printer_files_as_zip(
+    printer_id: int,
+    request: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Download multiple files from the printer as a ZIP archive."""
+    import io
+
+    paths = request.get("paths", [])
+    if not paths:
+        raise HTTPException(400, "No files specified")
+
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(404, "Printer not found")
+
+    # Create ZIP in memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in paths:
+            try:
+                data = await download_file_bytes_async(printer.ip_address, printer.access_code, path)
+                if data:
+                    filename = path.split("/")[-1]
+                    zf.writestr(filename, data)
+            except Exception as e:
+                logging.warning(f"Failed to add {path} to ZIP: {e}")
+                continue
+
+    zip_buffer.seek(0)
+    zip_data = zip_buffer.read()
+
+    if len(zip_data) == 0:
+        raise HTTPException(404, "No files could be downloaded")
+
+    return Response(
+        content=zip_data,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="printer-files.zip"'},
     )
 
 
