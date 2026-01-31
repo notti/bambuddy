@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
-import { X, Save, Loader2, Wifi, WifiOff, CheckCircle, Bell, Clock, LayoutGrid, Search, Plug, Power, Home, Play, Eye } from 'lucide-react';
+import { X, Save, Loader2, Wifi, WifiOff, CheckCircle, Bell, Clock, LayoutGrid, Search, Plug, Power, Home, Radio } from 'lucide-react';
 import { api } from '../api/client';
 import type { SmartPlug, SmartPlugCreate, SmartPlugUpdate, DiscoveredTasmotaDevice } from '../api/client';
 import { Button } from './Button';
@@ -15,7 +15,7 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
   const isEditing = !!plug;
 
   // Plug type selection
-  const [plugType, setPlugType] = useState<'tasmota' | 'homeassistant'>(plug?.plug_type || 'tasmota');
+  const [plugType, setPlugType] = useState<'tasmota' | 'homeassistant' | 'mqtt'>(plug?.plug_type || 'tasmota');
 
   const [name, setName] = useState(plug?.name || '');
   // Tasmota fields
@@ -24,6 +24,22 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
   const [password, setPassword] = useState(plug?.password || '');
   // Home Assistant fields
   const [haEntityId, setHaEntityId] = useState(plug?.ha_entity_id || '');
+  // MQTT fields - Power
+  const [mqttPowerTopic, setMqttPowerTopic] = useState(plug?.mqtt_power_topic || plug?.mqtt_topic || '');
+  const [mqttPowerPath, setMqttPowerPath] = useState(plug?.mqtt_power_path || '');
+  const [mqttPowerMultiplier, setMqttPowerMultiplier] = useState<string>(
+    (plug?.mqtt_power_multiplier ?? plug?.mqtt_multiplier ?? 1).toString()
+  );
+  // MQTT fields - Energy
+  const [mqttEnergyTopic, setMqttEnergyTopic] = useState(plug?.mqtt_energy_topic || '');
+  const [mqttEnergyPath, setMqttEnergyPath] = useState(plug?.mqtt_energy_path || '');
+  const [mqttEnergyMultiplier, setMqttEnergyMultiplier] = useState<string>(
+    (plug?.mqtt_energy_multiplier ?? 1).toString()
+  );
+  // MQTT fields - State
+  const [mqttStateTopic, setMqttStateTopic] = useState(plug?.mqtt_state_topic || '');
+  const [mqttStatePath, setMqttStatePath] = useState(plug?.mqtt_state_path || '');
+  const [mqttStateOnValue, setMqttStateOnValue] = useState(plug?.mqtt_state_on_value || '');
   // HA energy sensor entities (optional)
   const [haPowerEntity, setHaPowerEntity] = useState(plug?.ha_power_entity || '');
   const [haEnergyTodayEntity, setHaEnergyTodayEntity] = useState(plug?.ha_energy_today_entity || '');
@@ -51,10 +67,6 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
   const [testResult, setTestResult] = useState<{ success: boolean; state?: string | null; device_name?: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Automation settings
-  const [autoOn, setAutoOn] = useState(plug?.auto_on ?? true);
-  const [autoOff, setAutoOff] = useState(plug?.auto_off ?? true);
-
   // Power alert settings
   const [powerAlertEnabled, setPowerAlertEnabled] = useState(plug?.power_alert_enabled || false);
   const [powerAlertHigh, setPowerAlertHigh] = useState<string>(plug?.power_alert_high?.toString() || '');
@@ -65,9 +77,8 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
   const [scheduleOnTime, setScheduleOnTime] = useState<string>(plug?.schedule_on_time || '');
   const [scheduleOffTime, setScheduleOffTime] = useState<string>(plug?.schedule_off_time || '');
 
-  // Visibility options
+  // Switchbar visibility
   const [showInSwitchbar, setShowInSwitchbar] = useState(plug?.show_in_switchbar || false);
-  const [showOnPrinterCard, setShowOnPrinterCard] = useState(plug?.show_on_printer_card ?? true);
 
   // Discovery state
   const [isScanning, setIsScanning] = useState(false);
@@ -240,10 +251,6 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
     mutationFn: (data: SmartPlugCreate) => api.createSmartPlug(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['smart-plugs'] });
-      // Also invalidate script plugs queries for printer cards
-      queryClient.invalidateQueries({ predicate: (query) =>
-        Array.isArray(query.queryKey) && query.queryKey[0] === 'scriptPlugsByPrinter'
-      });
       onClose();
     },
     onError: (err: Error) => {
@@ -256,10 +263,6 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
     mutationFn: (data: SmartPlugUpdate) => api.updateSmartPlug(plug!.id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['smart-plugs'] });
-      // Also invalidate script plugs queries for printer cards
-      queryClient.invalidateQueries({ predicate: (query) =>
-        Array.isArray(query.queryKey) && query.queryKey[0] === 'scriptPlugsByPrinter'
-      });
       onClose();
     },
     onError: (err: Error) => {
@@ -267,17 +270,11 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
     },
   });
 
-  // Check if selected entity is a script (scripts allow multiple plugs per printer)
-  const isScript = plugType === 'homeassistant' && haEntityId?.startsWith('script.');
-
   // Filter out printers that already have a plug assigned (except current plug's printer)
-  // Scripts can link to any printer (they're for multi-device control)
-  const availablePrinters = isScript
-    ? printers
-    : printers?.filter(p => {
-        const hasPlug = existingPlugs?.some(ep => ep.printer_id === p.id && ep.id !== plug?.id);
-        return !hasPlug;
-      });
+  const availablePrinters = printers?.filter(p => {
+    const hasPlug = existingPlugs?.some(ep => ep.printer_id === p.id && ep.id !== plug?.id);
+    return !hasPlug;
+  });
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -298,6 +295,18 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
       return;
     }
 
+    if (plugType === 'mqtt') {
+      // Check that at least one topic is configured (path is optional)
+      const hasPower = mqttPowerTopic.trim();
+      const hasEnergy = mqttEnergyTopic.trim();
+      const hasState = mqttStateTopic.trim();
+
+      if (!hasPower && !hasEnergy && !hasState) {
+        setError('At least one MQTT topic must be configured for power, energy, or state monitoring');
+        return;
+      }
+    }
+
     const data = {
       name: name.trim(),
       plug_type: plugType,
@@ -307,12 +316,21 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
       ha_power_entity: plugType === 'homeassistant' ? (haPowerEntity || null) : null,
       ha_energy_today_entity: plugType === 'homeassistant' ? (haEnergyTodayEntity || null) : null,
       ha_energy_total_entity: plugType === 'homeassistant' ? (haEnergyTotalEntity || null) : null,
+      // MQTT power fields
+      mqtt_power_topic: plugType === 'mqtt' ? (mqttPowerTopic.trim() || null) : null,
+      mqtt_power_path: plugType === 'mqtt' ? (mqttPowerPath.trim() || null) : null,
+      mqtt_power_multiplier: plugType === 'mqtt' ? (parseFloat(mqttPowerMultiplier) || 1) : 1,
+      // MQTT energy fields
+      mqtt_energy_topic: plugType === 'mqtt' ? (mqttEnergyTopic.trim() || null) : null,
+      mqtt_energy_path: plugType === 'mqtt' ? (mqttEnergyPath.trim() || null) : null,
+      mqtt_energy_multiplier: plugType === 'mqtt' ? (parseFloat(mqttEnergyMultiplier) || 1) : 1,
+      // MQTT state fields
+      mqtt_state_topic: plugType === 'mqtt' ? (mqttStateTopic.trim() || null) : null,
+      mqtt_state_path: plugType === 'mqtt' ? (mqttStatePath.trim() || null) : null,
+      mqtt_state_on_value: plugType === 'mqtt' ? (mqttStateOnValue.trim() || null) : null,
       username: plugType === 'tasmota' ? (username.trim() || null) : null,
       password: plugType === 'tasmota' ? (password.trim() || null) : null,
       printer_id: printerId,
-      // Automation
-      auto_on: autoOn,
-      auto_off: autoOff,
       // Power alerts
       power_alert_enabled: powerAlertEnabled,
       power_alert_high: powerAlertHigh ? parseFloat(powerAlertHigh) : null,
@@ -321,9 +339,8 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
       schedule_enabled: scheduleEnabled,
       schedule_on_time: scheduleOnTime || null,
       schedule_off_time: scheduleOffTime || null,
-      // Visibility options
+      // Switchbar
       show_in_switchbar: showInSwitchbar,
-      show_on_printer_card: showOnPrinterCard,
     };
 
     if (isEditing) {
@@ -375,7 +392,7 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
                   setTestResult(null);
                   setError(null);
                 }}
-                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium transition-colors ${
+                className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg font-medium transition-colors ${
                   plugType === 'tasmota'
                     ? 'bg-bambu-green text-white'
                     : 'bg-bambu-dark text-bambu-gray hover:text-white border border-bambu-dark-tertiary'
@@ -391,14 +408,30 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
                   setTestResult(null);
                   setError(null);
                 }}
-                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium transition-colors ${
+                className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg font-medium transition-colors ${
                   plugType === 'homeassistant'
                     ? 'bg-bambu-green text-white'
                     : 'bg-bambu-dark text-bambu-gray hover:text-white border border-bambu-dark-tertiary'
                 }`}
               >
                 <Home className="w-4 h-4" />
-                Home Assistant
+                HA
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPlugType('mqtt');
+                  setTestResult(null);
+                  setError(null);
+                }}
+                className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg font-medium transition-colors ${
+                  plugType === 'mqtt'
+                    ? 'bg-bambu-green text-white'
+                    : 'bg-bambu-dark text-bambu-gray hover:text-white border border-bambu-dark-tertiary'
+                }`}
+              >
+                <Radio className="w-4 h-4" />
+                MQTT
               </button>
             </div>
           )}
@@ -605,15 +638,15 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
                         <p className="text-xs text-bambu-gray mt-1">
                           {debouncedSearch
                             ? `Searching all entities (${availableEntities.length} found)`
-                            : `Showing switch, light, input_boolean, script (${availableEntities.length} available)`}
+                            : `Showing switch, light, input_boolean (${availableEntities.length} available)`}
                         </p>
                       </div>
                     );
                   })()}
 
 
-                  {/* Energy Monitoring Section (Optional) - hidden for scripts */}
-                  {haEntityId && !isScript && haSensorEntities && haSensorEntities.length > 0 && (
+                  {/* Energy Monitoring Section (Optional) */}
+                  {haEntityId && haSensorEntities && haSensorEntities.length > 0 && (
                     <div className="border-t border-bambu-dark-tertiary pt-4 mt-4 space-y-3">
                       <div>
                         <p className="text-white font-medium mb-1">Energy Monitoring (Optional)</p>
@@ -880,6 +913,155 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
             </div>
           )}
 
+          {/* MQTT Configuration - only show when MQTT is selected */}
+          {plugType === 'mqtt' && (
+            <div className="space-y-3">
+              {/* MQTT broker not configured */}
+              {!settings?.mqtt_broker && (
+                <div className="p-3 bg-yellow-500/20 border border-yellow-500/50 rounded-lg text-sm text-yellow-400">
+                  MQTT broker not configured. Set broker address in{' '}
+                  <span className="font-medium">Settings → Network → MQTT Publishing</span>
+                  {' '}(you don't need to enable publishing, just fill in the broker details).
+                </div>
+              )}
+
+              {/* MQTT broker configured - show fields */}
+              {settings?.mqtt_broker && (
+                <>
+                  <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg text-sm text-blue-300">
+                    <p className="font-medium mb-1">Monitor Only</p>
+                    <p className="text-xs opacity-80">
+                      MQTT plugs receive power/energy data via MQTT subscription. On/off control is not available - use your MQTT broker or home automation system.
+                    </p>
+                  </div>
+
+                  {/* Power Section */}
+                  <div className="space-y-3 p-3 bg-bambu-dark rounded-lg border border-bambu-dark-tertiary">
+                    <p className="text-white font-medium text-sm">Power Monitoring</p>
+                    <div>
+                      <label className="block text-sm text-bambu-gray mb-1">Topic</label>
+                      <input
+                        type="text"
+                        value={mqttPowerTopic}
+                        onChange={(e) => setMqttPowerTopic(e.target.value)}
+                        placeholder="zigbee2mqtt/shelly-working-room"
+                        className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg text-white placeholder-bambu-gray focus:border-bambu-green focus:outline-none"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-sm text-bambu-gray mb-1">JSON Path</label>
+                        <input
+                          type="text"
+                          value={mqttPowerPath}
+                          onChange={(e) => setMqttPowerPath(e.target.value)}
+                          placeholder="power_l1"
+                          className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg text-white placeholder-bambu-gray focus:border-bambu-green focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-bambu-gray mb-1">Multiplier</label>
+                        <input
+                          type="text"
+                          value={mqttPowerMultiplier}
+                          onChange={(e) => setMqttPowerMultiplier(e.target.value)}
+                          placeholder="1"
+                          className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg text-white placeholder-bambu-gray focus:border-bambu-green focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                    <p className="text-xs text-bambu-gray">
+                      JSON path extracts value from JSON payload (e.g., "power_l1"). Leave empty if topic publishes raw numeric values.<br/>
+                      Use multiplier 0.001 for mW→W, 1000 for kW→W.
+                    </p>
+                  </div>
+
+                  {/* Energy Section */}
+                  <div className="space-y-3 p-3 bg-bambu-dark rounded-lg border border-bambu-dark-tertiary">
+                    <p className="text-white font-medium text-sm">Energy Monitoring <span className="text-bambu-gray font-normal">(optional)</span></p>
+                    <div>
+                      <label className="block text-sm text-bambu-gray mb-1">Topic</label>
+                      <input
+                        type="text"
+                        value={mqttEnergyTopic}
+                        onChange={(e) => setMqttEnergyTopic(e.target.value)}
+                        placeholder="Same as power topic, or different"
+                        className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg text-white placeholder-bambu-gray focus:border-bambu-green focus:outline-none"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-sm text-bambu-gray mb-1">JSON Path</label>
+                        <input
+                          type="text"
+                          value={mqttEnergyPath}
+                          onChange={(e) => setMqttEnergyPath(e.target.value)}
+                          placeholder="energy_l1"
+                          className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg text-white placeholder-bambu-gray focus:border-bambu-green focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-bambu-gray mb-1">Multiplier</label>
+                        <input
+                          type="text"
+                          value={mqttEnergyMultiplier}
+                          onChange={(e) => setMqttEnergyMultiplier(e.target.value)}
+                          placeholder="1"
+                          className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg text-white placeholder-bambu-gray focus:border-bambu-green focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                    <p className="text-xs text-bambu-gray">
+                      JSON path extracts value from JSON payload. Leave empty for raw values.<br/>
+                      Use multiplier 0.001 for Wh→kWh, 1000 for MWh→kWh.
+                    </p>
+                  </div>
+
+                  {/* State Section */}
+                  <div className="space-y-3 p-3 bg-bambu-dark rounded-lg border border-bambu-dark-tertiary">
+                    <p className="text-white font-medium text-sm">State Monitoring <span className="text-bambu-gray font-normal">(optional)</span></p>
+                    <div>
+                      <label className="block text-sm text-bambu-gray mb-1">Topic</label>
+                      <input
+                        type="text"
+                        value={mqttStateTopic}
+                        onChange={(e) => setMqttStateTopic(e.target.value)}
+                        placeholder="Same as power topic, or different"
+                        className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg text-white placeholder-bambu-gray focus:border-bambu-green focus:outline-none"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-sm text-bambu-gray mb-1">JSON Path</label>
+                        <input
+                          type="text"
+                          value={mqttStatePath}
+                          onChange={(e) => setMqttStatePath(e.target.value)}
+                          placeholder="state_l1"
+                          className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg text-white placeholder-bambu-gray focus:border-bambu-green focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-bambu-gray mb-1">ON Value</label>
+                        <input
+                          type="text"
+                          value={mqttStateOnValue}
+                          onChange={(e) => setMqttStateOnValue(e.target.value)}
+                          placeholder="ON, true, 1"
+                          className="w-full px-3 py-2 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg text-white placeholder-bambu-gray focus:border-bambu-green focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                    <p className="text-xs text-bambu-gray">
+                      JSON path extracts value from JSON payload. Leave empty for raw values.<br/>
+                      ON value: the exact string that means "ON". Leave empty for auto-detect (ON, true, 1).
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {/* IP Address - only show for Tasmota */}
           {plugType === 'tasmota' && (
             <div>
@@ -982,128 +1164,82 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
             </>
           )}
 
-          {/* Link to Printer */}
-          <div>
-            <label className="block text-sm text-bambu-gray mb-1">Link to Printer</label>
-            <select
-              value={printerId ?? ''}
-              onChange={(e) => setPrinterId(e.target.value ? Number(e.target.value) : null)}
-              className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
-            >
-              <option value="">No printer (manual control only)</option>
-              {availablePrinters?.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-bambu-gray mt-1">
-              {isScript
-                ? 'Link to a printer to enable auto-run triggers'
-                : 'Linking enables automatic on/off when prints start/complete'}
-            </p>
+          {/* Link to Printer - not shown for MQTT plugs (monitor-only) */}
+          {plugType !== 'mqtt' && (
+            <div>
+              <label className="block text-sm text-bambu-gray mb-1">Link to Printer</label>
+              <select
+                value={printerId ?? ''}
+                onChange={(e) => setPrinterId(e.target.value ? Number(e.target.value) : null)}
+                className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+              >
+                <option value="">No printer (manual control only)</option>
+                {availablePrinters?.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-bambu-gray mt-1">
+                Linking enables automatic on/off when prints start/complete
+              </p>
+            </div>
+          )}
+
+          {/* Power Alerts */}
+          <div className="border-t border-bambu-dark-tertiary pt-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Bell className="w-4 h-4 text-bambu-green" />
+                <span className="text-white font-medium">Power Alerts</span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={powerAlertEnabled}
+                  onChange={(e) => setPowerAlertEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
+              </label>
+            </div>
+            {powerAlertEnabled && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm text-bambu-gray mb-1">Alert if above (W)</label>
+                    <input
+                      type="number"
+                      value={powerAlertHigh}
+                      onChange={(e) => setPowerAlertHigh(e.target.value)}
+                      placeholder="e.g. 200"
+                      min="0"
+                      max="5000"
+                      className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-bambu-gray mb-1">Alert if below (W)</label>
+                    <input
+                      type="number"
+                      value={powerAlertLow}
+                      onChange={(e) => setPowerAlertLow(e.target.value)}
+                      placeholder="e.g. 10"
+                      min="0"
+                      max="5000"
+                      className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-bambu-gray">
+                  Get notified when power consumption crosses these thresholds. Leave empty to disable that direction.
+                </p>
+              </div>
+            )}
           </div>
 
-          {/* Script Options - only show for HA scripts */}
-          {isScript && (
-            <div className="border-t border-bambu-dark-tertiary pt-4 space-y-4">
-              <div className="flex items-center gap-2 mb-2">
-                <Play className="w-4 h-4 text-bambu-green" />
-                <span className="text-white font-medium">Script Automation</span>
-              </div>
-
-              {/* Auto-run when printer turns on */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-white">Run when printer turns on</span>
-                  <p className="text-xs text-bambu-gray">Execute script when main plug is switched on</p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={autoOn}
-                    onChange={(e) => setAutoOn(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
-                </label>
-              </div>
-
-              {/* Auto-run when printer turns off */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-white">Run when printer turns off</span>
-                  <p className="text-xs text-bambu-gray">Execute script when main plug is switched off</p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={autoOff}
-                    onChange={(e) => setAutoOff(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
-                </label>
-              </div>
-            </div>
-          )}
-
-          {/* Power Alerts - hidden for scripts (no power monitoring) */}
-          {!isScript && (
-            <div className="border-t border-bambu-dark-tertiary pt-4">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <Bell className="w-4 h-4 text-bambu-green" />
-                  <span className="text-white font-medium">Power Alerts</span>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={powerAlertEnabled}
-                    onChange={(e) => setPowerAlertEnabled(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
-                </label>
-              </div>
-              {powerAlertEnabled && (
-                <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-sm text-bambu-gray mb-1">Alert if above (W)</label>
-                      <input
-                        type="number"
-                        value={powerAlertHigh}
-                        onChange={(e) => setPowerAlertHigh(e.target.value)}
-                        placeholder="e.g. 200"
-                        min="0"
-                        max="5000"
-                        className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-bambu-gray mb-1">Alert if below (W)</label>
-                      <input
-                        type="number"
-                        value={powerAlertLow}
-                        onChange={(e) => setPowerAlertLow(e.target.value)}
-                        placeholder="e.g. 10"
-                        min="0"
-                        max="5000"
-                        className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
-                      />
-                    </div>
-                  </div>
-                  <p className="text-xs text-bambu-gray">
-                    Get notified when power consumption crosses these thresholds. Leave empty to disable that direction.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Schedule - hidden for scripts */}
-          {!isScript && (
+          {/* Schedule - not shown for MQTT plugs (monitor-only) */}
+          {plugType !== 'mqtt' && (
             <div className="border-t border-bambu-dark-tertiary pt-4">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
@@ -1150,31 +1286,8 @@ export function AddSmartPlugModal({ plug, onClose }: AddSmartPlugModalProps) {
             </div>
           )}
 
-          {/* Visibility Options */}
-          <div className="border-t border-bambu-dark-tertiary pt-4 space-y-4">
-            {/* Show on printer card - only for scripts */}
-            {isScript && (
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Eye className="w-4 h-4 text-bambu-green" />
-                  <div>
-                    <span className="text-white font-medium">Show on Printer Card</span>
-                    <p className="text-xs text-bambu-gray">Display script button on printer card</p>
-                  </div>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={showOnPrinterCard}
-                    onChange={(e) => setShowOnPrinterCard(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
-                </label>
-              </div>
-            )}
-
-            {/* Show in Switchbar */}
+          {/* Switchbar Visibility */}
+          <div className="border-t border-bambu-dark-tertiary pt-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <LayoutGrid className="w-4 h-4 text-bambu-green" />

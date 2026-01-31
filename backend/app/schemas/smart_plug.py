@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 
 class SmartPlugBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    plug_type: Literal["tasmota", "homeassistant"] = "tasmota"
+    plug_type: Literal["tasmota", "homeassistant", "mqtt"] = "tasmota"
 
     # Tasmota fields (required when plug_type="tasmota")
     ip_address: str | None = Field(default=None, pattern=r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
@@ -19,6 +19,30 @@ class SmartPlugBase(BaseModel):
     ha_power_entity: str | None = Field(default=None, pattern=r"^sensor\.[a-z0-9_]+$")
     ha_energy_today_entity: str | None = Field(default=None, pattern=r"^sensor\.[a-z0-9_]+$")
     ha_energy_total_entity: str | None = Field(default=None, pattern=r"^sensor\.[a-z0-9_]+$")
+
+    # MQTT fields (required when plug_type="mqtt")
+    # Legacy field - kept for backward compatibility
+    mqtt_topic: str | None = Field(default=None, max_length=200)  # Deprecated, use mqtt_power_topic
+
+    # Power monitoring
+    mqtt_power_topic: str | None = Field(default=None, max_length=200)  # Topic for power data
+    mqtt_power_path: str | None = Field(default=None, max_length=100)  # e.g., "power_l1" or "data.power"
+    mqtt_power_multiplier: float = Field(default=1.0, ge=0.0001, le=10000)  # Unit conversion for power
+
+    # Energy monitoring
+    mqtt_energy_topic: str | None = Field(default=None, max_length=200)  # Topic for energy data
+    mqtt_energy_path: str | None = Field(default=None, max_length=100)  # e.g., "energy_l1"
+    mqtt_energy_multiplier: float = Field(default=1.0, ge=0.0001, le=10000)  # Unit conversion for energy
+
+    # State monitoring
+    mqtt_state_topic: str | None = Field(default=None, max_length=200)  # Topic for state data
+    mqtt_state_path: str | None = Field(default=None, max_length=100)  # e.g., "state_l1" for ON/OFF
+    mqtt_state_on_value: str | None = Field(
+        default=None, max_length=50
+    )  # What value means "ON" (e.g., "ON", "true", "1")
+
+    # Legacy multiplier - kept for backward compatibility
+    mqtt_multiplier: float = Field(default=1.0, ge=0.0001, le=10000)  # Deprecated, use mqtt_power_multiplier
 
     printer_id: int | None = None
     enabled: bool = True
@@ -45,6 +69,17 @@ class SmartPlugBase(BaseModel):
             raise ValueError("ip_address is required for Tasmota plugs")
         if self.plug_type == "homeassistant" and not self.ha_entity_id:
             raise ValueError("ha_entity_id is required for Home Assistant plugs")
+        if self.plug_type == "mqtt":
+            # Determine the effective power topic (new field takes priority, fall back to legacy)
+            power_topic = self.mqtt_power_topic or self.mqtt_topic
+            # Path is optional - if not set, raw MQTT payload value will be used
+            has_power = bool(power_topic)
+            has_energy = bool(self.mqtt_energy_topic)
+            has_state = bool(self.mqtt_state_topic)
+
+            # At least one data source must be configured (path is optional)
+            if not has_power and not has_energy and not has_state:
+                raise ValueError("At least one MQTT topic must be configured for power, energy, or state monitoring")
         return self
 
 
@@ -54,13 +89,28 @@ class SmartPlugCreate(SmartPlugBase):
 
 class SmartPlugUpdate(BaseModel):
     name: str | None = None
-    plug_type: Literal["tasmota", "homeassistant"] | None = None
+    plug_type: Literal["tasmota", "homeassistant", "mqtt"] | None = None
     ip_address: str | None = None
     ha_entity_id: str | None = None
     # Home Assistant energy sensor entities (optional)
     ha_power_entity: str | None = None
     ha_energy_today_entity: str | None = None
     ha_energy_total_entity: str | None = None
+    # MQTT fields (legacy)
+    mqtt_topic: str | None = None
+    mqtt_multiplier: float | None = Field(default=None, ge=0.0001, le=10000)
+    # MQTT power fields
+    mqtt_power_topic: str | None = None
+    mqtt_power_path: str | None = None
+    mqtt_power_multiplier: float | None = Field(default=None, ge=0.0001, le=10000)
+    # MQTT energy fields
+    mqtt_energy_topic: str | None = None
+    mqtt_energy_path: str | None = None
+    mqtt_energy_multiplier: float | None = Field(default=None, ge=0.0001, le=10000)
+    # MQTT state fields
+    mqtt_state_topic: str | None = None
+    mqtt_state_path: str | None = None
+    mqtt_state_on_value: str | None = None
     printer_id: int | None = None
     enabled: bool | None = None
     auto_on: bool | None = None

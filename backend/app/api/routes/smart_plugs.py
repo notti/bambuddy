@@ -27,6 +27,7 @@ from backend.app.schemas.smart_plug import (
 )
 from backend.app.services.discovery import tasmota_scanner
 from backend.app.services.homeassistant import homeassistant_service
+from backend.app.services.mqtt_relay import mqtt_relay
 from backend.app.services.notification_service import notification_service
 from backend.app.services.printer_manager import printer_manager
 from backend.app.services.tasmota import tasmota_service
@@ -72,12 +73,68 @@ async def create_smart_plug(
                 if not existing_is_script:
                     raise HTTPException(400, "This printer already has a smart plug assigned")
 
+    # For MQTT plugs, ensure MQTT broker is configured and service is connected
+    if data.plug_type == "mqtt":
+        # Try to configure the smart plug service if not already configured
+        if not mqtt_relay.smart_plug_service.is_configured():
+            # Get MQTT broker settings from database
+            mqtt_broker = await get_setting(db, "mqtt_broker") or ""
+            if not mqtt_broker:
+                raise HTTPException(
+                    400,
+                    "MQTT broker not configured. Please set MQTT broker address in Settings → Network → MQTT Publishing.",
+                )
+
+            # Configure the smart plug service with broker settings
+            mqtt_settings = {
+                "mqtt_enabled": True,  # Enable for smart plug subscription
+                "mqtt_broker": mqtt_broker,
+                "mqtt_port": int(await get_setting(db, "mqtt_port") or "1883"),
+                "mqtt_username": await get_setting(db, "mqtt_username") or "",
+                "mqtt_password": await get_setting(db, "mqtt_password") or "",
+                "mqtt_use_tls": (await get_setting(db, "mqtt_use_tls") or "false") == "true",
+            }
+            await mqtt_relay.smart_plug_service.configure(mqtt_settings)
+
+            # Check if connection succeeded
+            if not mqtt_relay.smart_plug_service.is_configured():
+                raise HTTPException(
+                    400,
+                    f"Failed to connect to MQTT broker at {mqtt_broker}. Please check your MQTT settings.",
+                )
+
     plug = SmartPlug(**data.model_dump())
     db.add(plug)
     await db.commit()
     await db.refresh(plug)
 
-    if plug.plug_type == "homeassistant":
+    # Subscribe MQTT plugs to their topics
+    if plug.plug_type == "mqtt":
+        # Determine effective topics (new fields take priority, fall back to legacy)
+        power_topic = plug.mqtt_power_topic or plug.mqtt_topic
+        energy_topic = plug.mqtt_energy_topic
+        state_topic = plug.mqtt_state_topic
+
+        # Only subscribe if at least one topic is configured
+        if power_topic or energy_topic or state_topic:
+            mqtt_relay.smart_plug_service.subscribe(
+                plug_id=plug.id,
+                # Power source (path is optional)
+                power_topic=power_topic,
+                power_path=plug.mqtt_power_path,
+                power_multiplier=plug.mqtt_power_multiplier or plug.mqtt_multiplier or 1.0,
+                # Energy source (path is optional)
+                energy_topic=energy_topic,
+                energy_path=plug.mqtt_energy_path,
+                energy_multiplier=plug.mqtt_energy_multiplier or plug.mqtt_multiplier or 1.0,
+                # State source (path is optional)
+                state_topic=state_topic,
+                state_path=plug.mqtt_state_path,
+                state_on_value=plug.mqtt_state_on_value,
+            )
+            topics = [t for t in [power_topic, energy_topic, state_topic] if t]
+            logger.info(f"Created MQTT plug '{plug.name}' subscribed to {', '.join(set(topics))}")
+    elif plug.plug_type == "homeassistant":
         logger.info(f"Created Home Assistant plug '{plug.name}' ({plug.ha_entity_id})")
     else:
         logger.info(f"Created Tasmota plug '{plug.name}' at {plug.ip_address}")
@@ -359,11 +416,73 @@ async def update_smart_plug(
                 if not existing_is_script:
                     raise HTTPException(400, "This printer already has a smart plug assigned")
 
+    # Track old MQTT settings for comparison
+    old_plug_type = plug.plug_type
+    old_mqtt_config = {
+        "power_topic": plug.mqtt_power_topic or plug.mqtt_topic,
+        "power_path": plug.mqtt_power_path,
+        "power_multiplier": plug.mqtt_power_multiplier,
+        "energy_topic": plug.mqtt_energy_topic or plug.mqtt_topic,
+        "energy_path": plug.mqtt_energy_path,
+        "energy_multiplier": plug.mqtt_energy_multiplier,
+        "state_topic": plug.mqtt_state_topic or plug.mqtt_topic,
+        "state_path": plug.mqtt_state_path,
+        "state_on_value": plug.mqtt_state_on_value,
+    }
+
     for field, value in update_data.items():
         setattr(plug, field, value)
 
     await db.commit()
     await db.refresh(plug)
+
+    # Handle MQTT subscription changes
+    if old_plug_type == "mqtt" and plug.plug_type != "mqtt":
+        # Changed away from MQTT - unsubscribe
+        mqtt_relay.smart_plug_service.unsubscribe(plug.id)
+    elif plug.plug_type == "mqtt":
+        # Check if any MQTT config changed
+        new_mqtt_config = {
+            "power_topic": plug.mqtt_power_topic or plug.mqtt_topic,
+            "power_path": plug.mqtt_power_path,
+            "power_multiplier": plug.mqtt_power_multiplier,
+            "energy_topic": plug.mqtt_energy_topic or plug.mqtt_topic,
+            "energy_path": plug.mqtt_energy_path,
+            "energy_multiplier": plug.mqtt_energy_multiplier,
+            "state_topic": plug.mqtt_state_topic or plug.mqtt_topic,
+            "state_path": plug.mqtt_state_path,
+            "state_on_value": plug.mqtt_state_on_value,
+        }
+
+        mqtt_changed = old_plug_type != "mqtt" or old_mqtt_config != new_mqtt_config
+
+        if mqtt_changed:
+            # Unsubscribe from old topics first
+            if old_plug_type == "mqtt":
+                mqtt_relay.smart_plug_service.unsubscribe(plug.id)
+
+            # Subscribe to new topics
+            power_topic = plug.mqtt_power_topic or plug.mqtt_topic
+            energy_topic = plug.mqtt_energy_topic
+            state_topic = plug.mqtt_state_topic
+
+            # Only subscribe if at least one topic is configured
+            if power_topic or energy_topic or state_topic:
+                mqtt_relay.smart_plug_service.subscribe(
+                    plug_id=plug.id,
+                    # Power source (path is optional)
+                    power_topic=power_topic,
+                    power_path=plug.mqtt_power_path,
+                    power_multiplier=plug.mqtt_power_multiplier or plug.mqtt_multiplier or 1.0,
+                    # Energy source (path is optional)
+                    energy_topic=energy_topic,
+                    energy_path=plug.mqtt_energy_path,
+                    energy_multiplier=plug.mqtt_energy_multiplier or plug.mqtt_multiplier or 1.0,
+                    # State source (path is optional)
+                    state_topic=state_topic,
+                    state_path=plug.mqtt_state_path,
+                    state_on_value=plug.mqtt_state_on_value,
+                )
 
     logger.info(f"Updated smart plug '{plug.name}'")
     return plug
@@ -378,6 +497,12 @@ async def delete_smart_plug(plug_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Smart plug not found")
 
     plug_name = plug.name
+    plug_type = plug.plug_type
+
+    # Unsubscribe MQTT plug before deletion
+    if plug_type == "mqtt":
+        mqtt_relay.smart_plug_service.unsubscribe(plug_id)
+
     await db.delete(plug)
     await db.commit()
 
@@ -410,6 +535,13 @@ async def control_smart_plug(
     plug = result.scalar_one_or_none()
     if not plug:
         raise HTTPException(404, "Smart plug not found")
+
+    # MQTT plugs are monitor-only - cannot control them
+    if plug.plug_type == "mqtt":
+        raise HTTPException(
+            400,
+            "MQTT plugs are monitor-only. Use your MQTT broker or home automation system to control them.",
+        )
 
     service = await _get_service_for_plug(plug, db)
 
@@ -510,6 +642,44 @@ async def get_plug_status(plug_id: int, db: AsyncSession = Depends(get_db)):
     if not plug:
         raise HTTPException(404, "Smart plug not found")
 
+    # Handle MQTT plugs - get data from subscription service
+    if plug.plug_type == "mqtt":
+        data = mqtt_relay.smart_plug_service.get_plug_data(plug_id)
+        is_reachable = mqtt_relay.smart_plug_service.is_reachable(plug_id)
+
+        if data:
+            # Update last state in database
+            if is_reachable and data.state:
+                plug.last_state = data.state
+                plug.last_checked = datetime.utcnow()
+                await db.commit()
+
+            energy_data = None
+            if data.power is not None or data.energy is not None:
+                energy_data = SmartPlugEnergy(
+                    power=data.power,
+                    today=data.energy,
+                )
+                # Check power alerts
+                if data.power is not None:
+                    await check_power_alerts(plug, data.power, db)
+
+            return SmartPlugStatus(
+                state=data.state,
+                reachable=is_reachable,
+                device_name=None,
+                energy=energy_data,
+            )
+
+        # No data received yet
+        return SmartPlugStatus(
+            state=None,
+            reachable=False,
+            device_name=None,
+            energy=None,
+        )
+
+    # Handle Tasmota/HomeAssistant plugs
     service = await _get_service_for_plug(plug, db)
     status = await service.get_status(plug)
 

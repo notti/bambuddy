@@ -574,56 +574,47 @@ class TestSmartPlugsAPI:
         assert response.status_code == 400
         assert "not configured" in response.json()["detail"].lower()
 
+    # ========================================================================
+    # MQTT Integration tests
+    # ========================================================================
+
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_create_homeassistant_script_plug(self, async_client: AsyncClient):
-        """Verify Home Assistant script entity can be created as a plug.
-
-        Scripts allow users to trigger HA automations that control multiple devices
-        (e.g., turn on printer + fan together). Scripts can only be triggered (turn_on),
-        not turned off.
-        """
+    async def test_create_mqtt_plug(self, async_client: AsyncClient, mock_mqtt_smart_plug_service):
+        """Verify MQTT plug can be created with topic and JSON paths."""
         data = {
-            "name": "Turn On Printer Setup",
-            "plug_type": "homeassistant",
-            "ha_entity_id": "script.turn_on_printer_and_fan",
+            "name": "MQTT Energy Monitor",
+            "plug_type": "mqtt",
+            "mqtt_topic": "zigbee2mqtt/shelly-working-room",
+            "mqtt_power_path": "power_l1",
+            "mqtt_energy_path": "energy_l1",
+            "mqtt_state_path": "state_l1",
+            "mqtt_multiplier": 1.0,
             "enabled": True,
-            "auto_on": True,
-            "auto_off": False,  # Scripts don't support auto_off
         }
 
         response = await async_client.post("/api/v1/smart-plugs/", json=data)
 
         assert response.status_code == 200
         result = response.json()
-        assert result["name"] == "Turn On Printer Setup"
-        assert result["plug_type"] == "homeassistant"
-        assert result["ha_entity_id"] == "script.turn_on_printer_and_fan"
+        assert result["name"] == "MQTT Energy Monitor"
+        assert result["plug_type"] == "mqtt"
+        assert result["mqtt_topic"] == "zigbee2mqtt/shelly-working-room"
+        assert result["mqtt_power_path"] == "power_l1"
+        assert result["mqtt_energy_path"] == "energy_l1"
+        assert result["mqtt_state_path"] == "state_l1"
+        assert result["mqtt_multiplier"] == 1.0
+        assert result["ip_address"] is None
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_control_homeassistant_script(
-        self, async_client: AsyncClient, smart_plug_factory, mock_homeassistant_service, db_session
-    ):
-        """Verify HA script entity can be triggered via control endpoint."""
-        plug = await smart_plug_factory(plug_type="homeassistant", ha_entity_id="script.turn_on_printer")
-
-        # Scripts use "on" action to trigger
-        response = await async_client.post(f"/api/v1/smart-plugs/{plug.id}/control", json={"action": "on"})
-
-        assert response.status_code == 200
-        result = response.json()
-        assert result["success"] is True
-        assert result["action"] == "on"
-
-    @pytest.mark.asyncio
-    @pytest.mark.integration
-    async def test_invalid_ha_entity_domain(self, async_client: AsyncClient):
-        """Verify invalid HA entity domains are rejected."""
+    async def test_create_mqtt_plug_missing_topic(self, async_client: AsyncClient):
+        """Verify creating MQTT plug without topic fails."""
         data = {
-            "name": "Invalid Entity",
-            "plug_type": "homeassistant",
-            "ha_entity_id": "sensor.some_sensor",  # sensor domain not allowed
+            "name": "MQTT Plug",
+            "plug_type": "mqtt",
+            # Missing mqtt_topic
+            "mqtt_power_path": "power",
             "enabled": True,
         }
 
@@ -633,140 +624,204 @@ class TestSmartPlugsAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_script_can_coexist_with_regular_plug(
-        self, async_client: AsyncClient, smart_plug_factory, printer_factory, db_session
-    ):
-        """Verify HA scripts can be assigned to printers that already have a regular plug.
-
-        Scripts are for multi-device control (e.g., turn on printer + fan together),
-        so they should coexist with the main power plug.
-        """
-        # Create a printer
-        printer = await printer_factory(name="Test Printer")
-
-        # Create a regular Tasmota plug assigned to the printer
-        main_plug = await smart_plug_factory(
-            name="Main Power Plug",
-            plug_type="tasmota",
-            ip_address="192.168.1.100",
-            printer_id=printer.id,
-        )
-        assert main_plug.printer_id == printer.id
-
-        # Now try to create a script also assigned to the same printer
-        script_data = {
-            "name": "Turn On Everything",
-            "plug_type": "homeassistant",
-            "ha_entity_id": "script.turn_on_printer_setup",
-            "printer_id": printer.id,
+    async def test_create_mqtt_plug_missing_topic(self, async_client: AsyncClient):
+        """Verify creating MQTT plug without any topic fails."""
+        data = {
+            "name": "MQTT Plug",
+            "plug_type": "mqtt",
+            # No topic configured at all
             "enabled": True,
         }
 
-        response = await async_client.post("/api/v1/smart-plugs/", json=script_data)
+        response = await async_client.post("/api/v1/smart-plugs/", json=data)
 
-        # Should succeed - scripts can coexist with regular plugs
-        assert response.status_code == 200
-        result = response.json()
-        assert result["printer_id"] == printer.id
-        assert result["ha_entity_id"] == "script.turn_on_printer_setup"
+        assert response.status_code == 422  # Validation error
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_regular_plug_blocked_when_another_exists(
-        self, async_client: AsyncClient, smart_plug_factory, printer_factory, db_session
-    ):
-        """Verify regular plugs cannot be assigned if printer already has one."""
-        # Create a printer
-        printer = await printer_factory(name="Test Printer")
-
-        # Create a regular plug assigned to the printer
-        await smart_plug_factory(
-            name="Main Power Plug",
-            plug_type="tasmota",
-            ip_address="192.168.1.100",
-            printer_id=printer.id,
-        )
-
-        # Try to create another regular plug for the same printer
-        another_plug = {
-            "name": "Second Plug",
-            "plug_type": "homeassistant",
-            "ha_entity_id": "switch.another_plug",
-            "printer_id": printer.id,
+    async def test_create_mqtt_plug_with_multiplier(self, async_client: AsyncClient, mock_mqtt_smart_plug_service):
+        """Verify MQTT plug can use multiplier for unit conversion."""
+        data = {
+            "name": "MQTT mW to W",
+            "plug_type": "mqtt",
+            "mqtt_topic": "sensors/power",
+            "mqtt_power_path": "power_mw",
+            "mqtt_multiplier": 0.001,  # Convert mW to W
             "enabled": True,
         }
 
-        response = await async_client.post("/api/v1/smart-plugs/", json=another_plug)
+        response = await async_client.post("/api/v1/smart-plugs/", json=data)
 
-        # Should fail - only one regular plug per printer
+        assert response.status_code == 200
+        result = response.json()
+        assert result["mqtt_multiplier"] == 0.001
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_control_mqtt_plug_returns_error(self, async_client: AsyncClient, smart_plug_factory, db_session):
+        """Verify MQTT plugs cannot be controlled (monitor-only)."""
+        plug = await smart_plug_factory(
+            plug_type="mqtt",
+            mqtt_topic="test/topic",
+            mqtt_power_path="power",
+        )
+
+        response = await async_client.post(f"/api/v1/smart-plugs/{plug.id}/control", json={"action": "on"})
+
         assert response.status_code == 400
-        assert "already has a smart plug" in response.json()["detail"]
+        assert "monitor-only" in response.json()["detail"].lower()
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_get_scripts_by_printer_filters_by_show_on_printer_card(
-        self, async_client: AsyncClient, smart_plug_factory, printer_factory, db_session
-    ):
-        """Verify scripts endpoint only returns scripts with show_on_printer_card=True."""
-        printer = await printer_factory(name="Test Printer")
-
-        # Create a script with show_on_printer_card=True (default)
-        visible_script = await smart_plug_factory(
-            name="Visible Script",
-            plug_type="homeassistant",
-            ha_entity_id="script.visible_script",
-            printer_id=printer.id,
-            show_on_printer_card=True,
+    async def test_update_mqtt_plug_topic(self, async_client: AsyncClient, smart_plug_factory, db_session):
+        """Verify MQTT plug topic can be updated."""
+        plug = await smart_plug_factory(
+            plug_type="mqtt",
+            mqtt_topic="old/topic",
+            mqtt_power_path="power",
         )
 
-        # Create a script with show_on_printer_card=False
-        await smart_plug_factory(
-            name="Hidden Script",
-            plug_type="homeassistant",
-            ha_entity_id="script.hidden_script",
-            printer_id=printer.id,
-            show_on_printer_card=False,
+        response = await async_client.patch(
+            f"/api/v1/smart-plugs/{plug.id}",
+            json={
+                "mqtt_topic": "new/topic",
+                "mqtt_power_path": "new_power",
+            },
         )
-
-        response = await async_client.get(f"/api/v1/smart-plugs/by-printer/{printer.id}/scripts")
-
-        assert response.status_code == 200
-        scripts = response.json()
-        # Should only return the visible script
-        assert len(scripts) == 1
-        assert scripts[0]["id"] == visible_script.id
-        assert scripts[0]["name"] == "Visible Script"
-
-    @pytest.mark.asyncio
-    @pytest.mark.integration
-    async def test_script_auto_on_auto_off_fields(
-        self, async_client: AsyncClient, smart_plug_factory, printer_factory, db_session
-    ):
-        """Verify scripts can have auto_on and auto_off set for automation triggers."""
-        printer = await printer_factory(name="Test Printer")
-
-        # Create a script with custom auto_on/auto_off settings
-        script_data = {
-            "name": "Fan Control Script",
-            "plug_type": "homeassistant",
-            "ha_entity_id": "script.fan_control",
-            "printer_id": printer.id,
-            "auto_on": True,
-            "auto_off": False,
-            "show_on_printer_card": True,
-        }
-
-        response = await async_client.post("/api/v1/smart-plugs/", json=script_data)
 
         assert response.status_code == 200
         result = response.json()
-        assert result["auto_on"] is True
-        assert result["auto_off"] is False
-        assert result["show_on_printer_card"] is True
+        assert result["mqtt_topic"] == "new/topic"
+        assert result["mqtt_power_path"] == "new_power"
 
-        # Update the script's auto_off setting
-        update_response = await async_client.patch(f"/api/v1/smart-plugs/{result['id']}", json={"auto_off": True})
+    # ========================================================================
+    # Enhanced MQTT Integration tests (separate topics per data type)
+    # ========================================================================
 
-        assert update_response.status_code == 200
-        updated = update_response.json()
-        assert updated["auto_off"] is True
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_create_mqtt_plug_with_separate_topics(self, async_client: AsyncClient, mock_mqtt_smart_plug_service):
+        """Verify MQTT plug can be created with separate topics for power, energy, and state."""
+        data = {
+            "name": "MQTT Separate Topics",
+            "plug_type": "mqtt",
+            "mqtt_power_topic": "zigbee/power",
+            "mqtt_power_path": "power_l1",
+            "mqtt_power_multiplier": 0.001,
+            "mqtt_energy_topic": "zigbee/energy",
+            "mqtt_energy_path": "energy_total",
+            "mqtt_energy_multiplier": 1.0,
+            "mqtt_state_topic": "zigbee/state",
+            "mqtt_state_path": "state",
+            "mqtt_state_on_value": "ON",
+            "enabled": True,
+        }
+
+        response = await async_client.post("/api/v1/smart-plugs/", json=data)
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["name"] == "MQTT Separate Topics"
+        assert result["plug_type"] == "mqtt"
+        # Power fields
+        assert result["mqtt_power_topic"] == "zigbee/power"
+        assert result["mqtt_power_path"] == "power_l1"
+        assert result["mqtt_power_multiplier"] == 0.001
+        # Energy fields
+        assert result["mqtt_energy_topic"] == "zigbee/energy"
+        assert result["mqtt_energy_path"] == "energy_total"
+        assert result["mqtt_energy_multiplier"] == 1.0
+        # State fields
+        assert result["mqtt_state_topic"] == "zigbee/state"
+        assert result["mqtt_state_path"] == "state"
+        assert result["mqtt_state_on_value"] == "ON"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_create_mqtt_plug_energy_only(self, async_client: AsyncClient, mock_mqtt_smart_plug_service):
+        """Verify MQTT plug can be created with only energy monitoring."""
+        data = {
+            "name": "Energy Only Monitor",
+            "plug_type": "mqtt",
+            "mqtt_energy_topic": "sensors/energy",
+            "mqtt_energy_path": "kwh",
+            "mqtt_energy_multiplier": 0.001,  # Wh to kWh
+            "enabled": True,
+        }
+
+        response = await async_client.post("/api/v1/smart-plugs/", json=data)
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["mqtt_energy_topic"] == "sensors/energy"
+        assert result["mqtt_energy_path"] == "kwh"
+        assert result["mqtt_energy_multiplier"] == 0.001
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_create_mqtt_plug_state_only(self, async_client: AsyncClient, mock_mqtt_smart_plug_service):
+        """Verify MQTT plug can be created with only state monitoring."""
+        data = {
+            "name": "State Only Monitor",
+            "plug_type": "mqtt",
+            "mqtt_state_topic": "switches/outlet",
+            "mqtt_state_path": "state",
+            "mqtt_state_on_value": "true",
+            "enabled": True,
+        }
+
+        response = await async_client.post("/api/v1/smart-plugs/", json=data)
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["mqtt_state_topic"] == "switches/outlet"
+        assert result["mqtt_state_path"] == "state"
+        assert result["mqtt_state_on_value"] == "true"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_create_mqtt_plug_topic_only_succeeds(self, async_client: AsyncClient, mock_mqtt_smart_plug_service):
+        """Verify creating MQTT plug with topic only (no path) succeeds for raw values."""
+        data = {
+            "name": "Raw MQTT Plug",
+            "plug_type": "mqtt",
+            # Topic only, no path - valid for raw numeric MQTT values
+            "mqtt_power_topic": "zigbee/power",
+            "enabled": True,
+        }
+
+        response = await async_client.post("/api/v1/smart-plugs/", json=data)
+
+        assert response.status_code == 200  # Should succeed
+        result = response.json()
+        assert result["mqtt_power_topic"] == "zigbee/power"
+        assert result["mqtt_power_path"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_update_mqtt_plug_separate_multipliers(
+        self, async_client: AsyncClient, smart_plug_factory, db_session, mock_mqtt_smart_plug_service
+    ):
+        """Verify MQTT plug multipliers can be updated separately."""
+        plug = await smart_plug_factory(
+            plug_type="mqtt",
+            mqtt_power_topic="test/power",
+            mqtt_power_path="power",
+            mqtt_power_multiplier=1.0,
+            mqtt_energy_topic="test/energy",
+            mqtt_energy_path="energy",
+            mqtt_energy_multiplier=1.0,
+        )
+
+        response = await async_client.patch(
+            f"/api/v1/smart-plugs/{plug.id}",
+            json={
+                "mqtt_power_multiplier": 0.001,  # Change power multiplier only
+                "mqtt_energy_multiplier": 0.001,  # Change energy multiplier only
+            },
+        )
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["mqtt_power_multiplier"] == 0.001
+        assert result["mqtt_energy_multiplier"] == 0.001

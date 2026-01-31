@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
-import { Plug, Power, PowerOff, Loader2, Trash2, Settings2, Thermometer, Clock, Wifi, WifiOff, Edit2, Bell, Calendar, LayoutGrid, ExternalLink, Home, Play, Eye } from 'lucide-react';
+import { Plug, Power, PowerOff, Loader2, Trash2, Settings2, Thermometer, Clock, Wifi, WifiOff, Edit2, Bell, Calendar, LayoutGrid, ExternalLink, Home, Radio, Eye } from 'lucide-react';
 import { api } from '../api/client';
 import type { SmartPlug, SmartPlugUpdate } from '../api/client';
 import { Card, CardContent } from './Card';
@@ -55,24 +55,12 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
 
       return { previousStatus };
     },
-    onSuccess: (_data, action) => {
-      // Show toast for script triggers
-      const isScriptPlug = plug.plug_type === 'homeassistant' && plug.ha_entity_id?.startsWith('script.');
-      if (isScriptPlug && action === 'on') {
-        showToast(`Script "${plug.name}" triggered`, 'success');
-      }
-    },
     onError: (_err, action, context) => {
       // Rollback on error
       if (context?.previousStatus) {
         queryClient.setQueryData(['smart-plug-status', plug.id], context.previousStatus);
       }
-      const isScriptPlug = plug.plug_type === 'homeassistant' && plug.ha_entity_id?.startsWith('script.');
-      if (isScriptPlug) {
-        showToast(`Failed to trigger script "${plug.name}"`, 'error');
-      } else {
-        showToast(`Failed to turn ${action} "${plug.name}"`, 'error');
-      }
+      showToast(`Failed to turn ${action} "${plug.name}"`, 'error');
     },
     onSettled: () => {
       // Refetch after a short delay to get actual state
@@ -92,10 +80,6 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
       if (plug.printer_id) {
         queryClient.invalidateQueries({ queryKey: ['smartPlugByPrinter', plug.printer_id] });
       }
-      // Invalidate script plugs queries for printer cards
-      queryClient.invalidateQueries({ predicate: (query) =>
-        Array.isArray(query.queryKey) && query.queryKey[0] === 'scriptPlugsByPrinter'
-      });
     },
   });
 
@@ -104,19 +88,14 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
     mutationFn: () => api.deleteSmartPlug(plug.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['smart-plugs'] });
-      // Also invalidate script plugs queries for printer cards
-      queryClient.invalidateQueries({ predicate: (query) =>
-        Array.isArray(query.queryKey) && query.queryKey[0] === 'scriptPlugsByPrinter'
-      });
     },
   });
 
   const isOn = status?.state === 'ON';
-  const isReachable = status?.reachable ?? false;
+  // For MQTT plugs, consider reachable if we have power data (even if backend says not reachable)
+  const hasMqttData = plug.plug_type === 'mqtt' && (status?.energy?.power !== null && status?.energy?.power !== undefined);
+  const isReachable = (status?.reachable ?? false) || hasMqttData;
   const isPending = controlMutation.isPending;
-
-  // Check if this is a HA script entity (scripts can only be triggered, not toggled)
-  const isScript = plug.plug_type === 'homeassistant' && plug.ha_entity_id?.startsWith('script.');
 
   // Generate admin URL with auto-login credentials (Tasmota only)
   const getAdminUrl = () => {
@@ -138,9 +117,13 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
           {/* Header Row */}
           <div className="flex items-start justify-between gap-2 mb-3">
             <div className="flex items-center gap-3 min-w-0 flex-1">
-              <div className={`p-2 rounded-lg flex-shrink-0 ${isReachable ? ((isOn || isScript) ? 'bg-bambu-green/20' : 'bg-bambu-dark') : 'bg-red-500/20'}`}>
-                {isScript ? (
-                  <Play className={`w-5 h-5 ${isReachable ? 'text-bambu-green' : 'text-red-400'}`} />
+              <div className={`p-2 rounded-lg flex-shrink-0 ${
+                plug.plug_type === 'mqtt'
+                  ? (isReachable ? 'bg-teal-500/20' : 'bg-red-500/20')
+                  : (isReachable ? (isOn ? 'bg-bambu-green/20' : 'bg-bambu-dark') : 'bg-red-500/20')
+              }`}>
+                {plug.plug_type === 'mqtt' ? (
+                  <Radio className={`w-5 h-5 ${isReachable ? 'text-teal-400' : 'text-red-400'}`} />
                 ) : plug.plug_type === 'homeassistant' ? (
                   <Home className={`w-5 h-5 ${isReachable ? (isOn ? 'text-bambu-green' : 'text-bambu-gray') : 'text-red-400'}`} />
                 ) : (
@@ -148,9 +131,12 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
                 )}
               </div>
               <div className="min-w-0">
-                <h3 className="font-medium text-white truncate" title={plug.name}>{plug.name}</h3>
-                <p className="text-sm text-bambu-gray truncate" title={plug.plug_type === 'homeassistant' ? plug.ha_entity_id ?? undefined : plug.ip_address ?? undefined}>
-                  {plug.plug_type === 'homeassistant' ? plug.ha_entity_id : plug.ip_address}
+                <h3 className="font-medium text-white truncate">{plug.name}</h3>
+                <p
+                  className="text-sm text-bambu-gray truncate"
+                  title={plug.plug_type === 'mqtt' ? plug.mqtt_topic ?? undefined : plug.plug_type === 'homeassistant' ? plug.ha_entity_id ?? undefined : plug.ip_address ?? undefined}
+                >
+                  {plug.plug_type === 'mqtt' ? plug.mqtt_topic : plug.plug_type === 'homeassistant' ? plug.ha_entity_id : plug.ip_address}
                 </p>
               </div>
             </div>
@@ -159,23 +145,23 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
             <div className="flex flex-col items-end gap-1 flex-shrink-0">
               {statusLoading ? (
                 <Loader2 className="w-4 h-4 text-bambu-gray animate-spin" />
-              ) : isScript ? (
-                /* Script entities: show badge and Ready status stacked */
-                <div className="flex flex-col items-end gap-1">
-                  <span className="flex items-center gap-1 px-2 py-0.5 bg-blue-500/20 text-blue-400 text-xs rounded-full">
-                    <Play className="w-3 h-3" />
-                    Script
-                  </span>
-                  <span className={`text-sm ${isReachable ? 'text-status-ok' : 'text-status-error'}`}>
-                    {isReachable ? 'Ready' : 'Offline'}
+              ) : plug.plug_type === 'mqtt' ? (
+                /* MQTT plugs - show badge and checkmark when receiving data */
+                <div className="flex items-center gap-1.5 text-sm whitespace-nowrap">
+                  <span className="px-1.5 py-0.5 bg-teal-500/20 text-teal-400 text-[10px] font-medium rounded flex-shrink-0">MQTT</span>
+                  {isReachable && <span className="text-status-ok">✓</span>}
+                </div>
+              ) : plug.plug_type === 'homeassistant' ? (
+                <div className="flex items-center gap-1 text-sm">
+                  <span className="px-1 py-0.5 bg-blue-500/20 text-blue-400 text-[10px] font-medium rounded">HA</span>
+                  <span className={isReachable ? (isOn ? 'text-status-ok' : 'text-bambu-gray') : 'text-status-error'}>
+                    {isReachable ? (status?.state || '?') : 'Offline'}
                   </span>
                 </div>
               ) : isReachable ? (
                 <div className="flex items-center gap-1 text-sm">
                   <Wifi className="w-4 h-4 text-status-ok" />
-                  <span className={isOn ? 'text-status-ok' : 'text-bambu-gray'}>
-                    {status?.state || 'Unknown'}
-                  </span>
+                  <span className={isOn ? 'text-status-ok' : 'text-bambu-gray'}>{status?.state || 'Unknown'}</span>
                 </div>
               ) : (
                 <div className="flex items-center gap-1 text-sm text-status-error">
@@ -208,8 +194,14 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
           )}
 
           {/* Feature Badges */}
-          {(plug.power_alert_enabled || plug.schedule_enabled) && (
+          {(plug.power_alert_enabled || plug.schedule_enabled || plug.plug_type === 'mqtt') && (
             <div className="flex flex-wrap gap-1.5 mb-3">
+              {plug.plug_type === 'mqtt' && (
+                <span className="flex items-center gap-1 px-2 py-0.5 bg-teal-500/20 text-teal-400 text-xs rounded-full">
+                  <Eye className="w-3 h-3" />
+                  Monitor Only
+                </span>
+              )}
               {plug.power_alert_enabled && (
                 <span className="flex items-center gap-1 px-2 py-0.5 bg-yellow-500/20 text-yellow-400 text-xs rounded-full">
                   <Bell className="w-3 h-3" />
@@ -229,46 +221,49 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
             </div>
           )}
 
-          {/* Quick Controls */}
-          <div className="flex gap-2 mb-3">
-            {isScript ? (
-              /* Script entities: single "Run" button */
+          {/* Quick Controls - hidden for MQTT plugs (monitor-only) */}
+          {plug.plug_type !== 'mqtt' && (
+            <div className="flex gap-2 mb-3">
               <Button
                 size="sm"
-                variant="primary"
+                variant={isOn ? 'primary' : 'secondary'}
                 disabled={!isReachable || isPending}
                 onClick={() => setShowPowerOnConfirm(true)}
                 className="flex-1"
               >
-                {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                Run Script
+                {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
+                On
               </Button>
-            ) : (
-              /* Regular entities: On/Off buttons */
-              <>
-                <Button
-                  size="sm"
-                  variant={isOn ? 'primary' : 'secondary'}
-                  disabled={!isReachable || isPending}
-                  onClick={() => setShowPowerOnConfirm(true)}
-                  className="flex-1"
-                >
-                  {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
-                  On
-                </Button>
-                <Button
-                  size="sm"
-                  variant={!isOn ? 'primary' : 'secondary'}
-                  disabled={!isReachable || isPending}
-                  onClick={() => setShowPowerOffConfirm(true)}
-                  className="flex-1"
-                >
-                  {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
-                  Off
-                </Button>
-              </>
-            )}
-          </div>
+              <Button
+                size="sm"
+                variant={!isOn ? 'primary' : 'secondary'}
+                disabled={!isReachable || isPending}
+                onClick={() => setShowPowerOffConfirm(true)}
+                className="flex-1"
+              >
+                {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
+                Off
+              </Button>
+            </div>
+          )}
+
+          {/* Energy display for MQTT plugs */}
+          {plug.plug_type === 'mqtt' && status?.energy && (
+            <div className="flex gap-2 mb-3 px-3 py-2 bg-bambu-dark rounded-lg">
+              {status.energy.power !== null && status.energy.power !== undefined && (
+                <div className="flex-1 text-center">
+                  <p className="text-lg font-semibold text-white">{Math.round(status.energy.power)}W</p>
+                  <p className="text-xs text-bambu-gray">Power</p>
+                </div>
+              )}
+              {status.energy.today !== null && status.energy.today !== undefined && (
+                <div className="flex-1 text-center border-l border-bambu-dark-tertiary">
+                  <p className="text-lg font-semibold text-white">{status.energy.today.toFixed(2)}</p>
+                  <p className="text-xs text-bambu-gray">kWh Today</p>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Toggle Settings Panel */}
           <button
@@ -277,7 +272,7 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
           >
             <span className="flex items-center gap-2">
               <Settings2 className="w-4 h-4" />
-              Automation Settings
+              {plug.plug_type === 'mqtt' ? 'Settings' : 'Automation Settings'}
             </span>
             <span>{isExpanded ? '-' : '+'}</span>
           </button>
@@ -285,28 +280,6 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
           {/* Expanded Settings */}
           {isExpanded && (
             <div className="pt-3 border-t border-bambu-dark-tertiary space-y-4">
-              {/* Show on Printer Card Toggle - only for scripts */}
-              {isScript && (
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Eye className="w-4 h-4 text-bambu-green" />
-                    <div>
-                      <p className="text-sm text-white">Show on Printer Card</p>
-                      <p className="text-xs text-bambu-gray">Display script button on printer card</p>
-                    </div>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={plug.show_on_printer_card}
-                      onChange={(e) => updateMutation.mutate({ show_on_printer_card: e.target.checked })}
-                      className="sr-only peer"
-                    />
-                    <div className="w-9 h-5 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bambu-green"></div>
-                  </label>
-                </div>
-              )}
-
               {/* Show in Switchbar Toggle */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -327,49 +300,48 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
                 </label>
               </div>
 
-              {/* Enabled Toggle */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-white">Enabled</p>
-                  <p className="text-xs text-bambu-gray">Enable automation for this plug</p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={plug.enabled}
-                    onChange={(e) => updateMutation.mutate({ enabled: e.target.checked })}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bambu-green"></div>
-                </label>
-              </div>
+              {/* Automation controls - only for controllable plugs (not MQTT) */}
+              {plug.plug_type !== 'mqtt' && (
+                <>
+                  {/* Enabled Toggle */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm text-white">Enabled</p>
+                      <p className="text-xs text-bambu-gray">Enable automation for this plug</p>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={plug.enabled}
+                        onChange={(e) => updateMutation.mutate({ enabled: e.target.checked })}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bambu-green"></div>
+                    </label>
+                  </div>
 
-              {/* Auto On / Run when printer turns on */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-white">{isScript ? 'Run when printer turns on' : 'Auto On'}</p>
-                  <p className="text-xs text-bambu-gray">
-                    {isScript ? 'Execute script when main plug is switched on' : 'Turn on when print starts'}
-                  </p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={plug.auto_on}
-                    onChange={(e) => updateMutation.mutate({ auto_on: e.target.checked })}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bambu-green"></div>
-                </label>
-              </div>
+                  {/* Auto On */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm text-white">Auto On</p>
+                      <p className="text-xs text-bambu-gray">Turn on when print starts</p>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={plug.auto_on}
+                        onChange={(e) => updateMutation.mutate({ auto_on: e.target.checked })}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bambu-green"></div>
+                    </label>
+                  </div>
 
-              {/* Auto Off / Run when printer turns off */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-white">{isScript ? 'Run when printer turns off' : 'Auto Off'}</p>
-                  <p className="text-xs text-bambu-gray">
-                    {isScript ? 'Execute script when main plug is switched off' : 'Turn off when print completes (one-shot)'}
-                  </p>
+                  {/* Auto Off */}
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm text-white">Auto Off</p>
+                      <p className="text-xs text-bambu-gray">Turn off when print completes (one-shot)</p>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input
@@ -382,8 +354,8 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
                 </label>
               </div>
 
-              {/* Delay Mode - hidden for script entities */}
-              {plug.auto_off && !isScript && (
+              {/* Delay Mode */}
+              {plug.auto_off && (
                 <div className="space-y-3 pl-4 border-l-2 border-bambu-dark-tertiary">
                   <div>
                     <p className="text-sm text-white mb-2">Turn Off Delay Mode</p>
@@ -441,6 +413,8 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
                   )}
                 </div>
               )}
+                </>
+              )}
 
               {/* Action Buttons */}
               <div className="flex gap-2 pt-2">
@@ -482,14 +456,12 @@ export function SmartPlugCard({ plug, onEdit }: SmartPlugCardProps) {
         />
       )}
 
-      {/* Power On / Run Script Confirmation */}
+      {/* Power On Confirmation */}
       {showPowerOnConfirm && (
         <ConfirmModal
-          title={isScript ? "Run Script" : "Turn On Smart Plug"}
-          message={isScript
-            ? `Are you sure you want to run the script "${plug.name}"?`
-            : `Are you sure you want to turn on "${plug.name}"?`}
-          confirmText={isScript ? "Run" : "Turn On"}
+          title="Turn On Smart Plug"
+          message={`Are you sure you want to turn on "${plug.name}"?`}
+          confirmText="Turn On"
           variant="default"
           onConfirm={() => {
             controlMutation.mutate('on');
