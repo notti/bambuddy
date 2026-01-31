@@ -34,6 +34,7 @@ async def get_db() -> AsyncSession:
 async def init_db():
     # Import models to register them with SQLAlchemy
     from backend.app.models import (  # noqa: F401
+        ams_history,
         api_key,
         archive,
         external_link,
@@ -45,11 +46,13 @@ async def init_db():
         maintenance,
         notification,
         notification_template,
+        pending_upload,
         print_queue,
         printer,
         project,
         project_bom,
         settings,
+        slot_preset,
         smart_plug,
         user,
     )
@@ -956,6 +959,38 @@ async def run_migrations(conn):
     # Migration: Add print_hours_offset column to printers (baseline hours adjustment)
     try:
         await conn.execute(text("ALTER TABLE printers ADD COLUMN print_hours_offset REAL DEFAULT 0.0"))
+    except Exception:
+        pass
+
+    # Migration: Add queue notification event columns to notification_providers
+    try:
+        await conn.execute(text("ALTER TABLE notification_providers ADD COLUMN on_queue_job_added BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(
+            text("ALTER TABLE notification_providers ADD COLUMN on_queue_job_assigned BOOLEAN DEFAULT 0")
+        )
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE notification_providers ADD COLUMN on_queue_job_started BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE notification_providers ADD COLUMN on_queue_job_waiting BOOLEAN DEFAULT 1"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE notification_providers ADD COLUMN on_queue_job_skipped BOOLEAN DEFAULT 1"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE notification_providers ADD COLUMN on_queue_job_failed BOOLEAN DEFAULT 1"))
+    except Exception:
+        pass
+    try:
+        await conn.execute(text("ALTER TABLE notification_providers ADD COLUMN on_queue_completed BOOLEAN DEFAULT 0"))
     except Exception:
         pass
 
