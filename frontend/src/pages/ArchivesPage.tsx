@@ -96,6 +96,15 @@ function isSlicedFile(filename: string | null | undefined): boolean {
   return lower.endsWith('.gcode') || lower.includes('.gcode.');
 }
 
+function getArchiveFileType(filename: string | null | undefined): string | undefined {
+  if (!filename) return undefined;
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.3mf')) return '3mf';
+  if (lower.endsWith('.stl')) return 'stl';
+  if (lower.endsWith('.gcode') || lower.includes('.gcode.')) return 'gcode';
+  return lower.split('.').pop();
+}
+
 // formatDate imported from '../utils/date' - handles UTC conversion
 
 function ArchiveCard({
@@ -1037,6 +1046,7 @@ function ArchiveCard({
         <ModelViewerModal
           archiveId={archive.id}
           title={archive.print_name || archive.filename}
+          fileType={getArchiveFileType(archive.filename)}
           onClose={() => setShowViewer(false)}
         />
       )}
@@ -1832,6 +1842,7 @@ function ArchiveListRow({
         <ModelViewerModal
           archiveId={archive.id}
           title={archive.print_name || archive.filename}
+          fileType={getArchiveFileType(archive.filename)}
           onClose={() => setShowViewer(false)}
         />
       )}
