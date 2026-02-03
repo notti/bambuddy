@@ -1784,6 +1784,8 @@ export default {
     projectsDescription: 'プロジェクト、BOMアイテム、添付ファイル',
     pendingUploadsDescription: 'レビュー待ちの仮想プリンターアップロード',
     apiKeysDescription: 'Webhook APIキー（インポート時に新しいキーが生成されます）',
+    restoreBackup: 'バックアップの復元',
+    restoreDescription: 'バックアップファイルからすべてのデータを置き換える',
     restoreNote: '復元後、仮想プリンターが再起動されます',
   },
 

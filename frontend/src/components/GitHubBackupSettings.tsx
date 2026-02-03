@@ -764,9 +764,9 @@ export function GitHubBackupSettings() {
             {/* Import */}
             <div className="flex items-center justify-between py-3 border-b border-bambu-dark-tertiary">
               <div>
-                <p className="text-white">Restore Backup</p>
+                <p className="text-white">{t('backup.restoreBackup')}</p>
                 <p className="text-sm text-bambu-gray">
-                  Replace all data from a backup file
+                  {t('backup.restoreDescription')}
                 </p>
                 <p className="text-xs text-bambu-gray-light mt-1">
                   {t('backup.restoreNote')}

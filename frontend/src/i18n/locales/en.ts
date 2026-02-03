@@ -2239,6 +2239,7 @@ export default {
     title: 'Backup & Restore',
     createBackup: 'Create Backup',
     restoreBackup: 'Restore Backup',
+    restoreDescription: 'Replace all data from a backup file',
     downloadBackup: 'Download Backup',
     uploadBackup: 'Upload Backup',
     lastBackup: 'Last Backup',

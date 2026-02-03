@@ -2239,6 +2239,7 @@ export default {
     title: 'Sichern & Wiederherstellen',
     createBackup: 'Sicherung erstellen',
     restoreBackup: 'Sicherung wiederherstellen',
+    restoreDescription: 'Alle Daten aus einer Sicherungsdatei ersetzen',
     downloadBackup: 'Sicherung herunterladen',
     uploadBackup: 'Sicherung hochladen',
     lastBackup: 'Letzte Sicherung',
