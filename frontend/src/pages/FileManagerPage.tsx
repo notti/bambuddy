@@ -1985,7 +1985,7 @@ export function FileManagerPage() {
                     file={file}
                     isSelected={selectedFiles.includes(file.id)}
                     isMobile={isMobile}
-                    showPrintScheduleButtons={selectedFiles.length === 1}
+                    showPrintScheduleButtons={selectedFiles.includes(file.id) && selectedFiles.length === 1}
                     t={t}
                     onSelect={handleFileSelect}
                     onDelete={(id) => setDeleteConfirm({ type: 'file', id })}
