@@ -77,6 +77,20 @@ const mockFiles = [
     duplicate_count: 2,
     created_at: '2024-01-02T00:00:00Z',
   },
+  {
+    id: 3,
+    filename: 'cube.gcode.3mf',
+    file_path: '/library/cube.gcode.3mf',
+    file_size: 2048576,
+    file_type: '3mf',
+    folder_id: null,
+    thumbnail_path: '/thumbnails/3.png',
+    print_name: 'Cube',
+    print_time_seconds: 1800,
+    print_count: 2,
+    duplicate_count: 0,
+    created_at: '2024-01-03T00:00:00Z',
+  },
 ];
 
 const mockStats = {
@@ -460,7 +474,26 @@ describe('FileManagerPage', () => {
   });
 
   describe('schedule print', () => {
-    it('shows schedule print button for sliced files', async () => {
+    it('shows schedule print button when one sliced file is selected', async () => {
+      const user = userEvent.setup();
+      render(<FileManagerPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Benchy')).toBeInTheDocument();
+      });
+
+      // Select a sliced file (benchy.gcode.3mf) by clicking on its card
+      const fileCard = screen.getByText('Benchy').closest('div[class*="cursor-pointer"]');
+      if (fileCard) {
+        await user.click(fileCard);
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText(/Schedule/)).toBeInTheDocument();
+      });
+    });
+
+    it('hides schedule print button when multiple files are selected', async () => {
       const user = userEvent.setup();
       render(<FileManagerPage />);
 
@@ -468,11 +501,12 @@ describe('FileManagerPage', () => {
         expect(screen.getByText('Select All')).toBeInTheDocument();
       });
 
-      // Select a sliced file (benchy.gcode.3mf)
+      // Select all files
       await user.click(screen.getByText('Select All'));
 
       await waitFor(() => {
-        expect(screen.getByText(/Schedule/)).toBeInTheDocument();
+        // Schedule button should not be present when multiple files are selected
+        expect(screen.queryByText(/Schedule/)).not.toBeInTheDocument();
       });
     });
   });

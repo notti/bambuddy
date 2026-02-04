@@ -1877,9 +1877,9 @@ export function FileManagerPage() {
                         <span className="hidden sm:inline">{t('common.print')}</span>
                       </Button>
                     )}
-                    {selectedSlicedFiles.length > 0 && (
+                    {selectedSlicedFiles.length === 1 && (
                       <Button
-                        variant={selectedSlicedFiles.length === 1 ? 'secondary' : 'primary'}
+                        variant="secondary"
                         size="sm"
                         // Note: Schedule dialog (PrintModal) is designed for single file at a time
                         // but supports scheduling to multiple printers. This provides more control
@@ -1889,7 +1889,7 @@ export function FileManagerPage() {
                         title={!hasPermission('queue:create') ? t('fileManager.noPermissionAddToQueue') : undefined}
                       >
                         <Clock className="w-4 h-4 sm:mr-1" />
-                        <span className="hidden sm:inline">{`${t('fileManager.schedulePrint')}${selectedSlicedFiles.length < selectedFiles.length ? ` (${selectedSlicedFiles.length})` : ''}`}</span>
+                        <span className="hidden sm:inline">{t('fileManager.schedulePrint')}</span>
                       </Button>
                     )}
                     <Button
