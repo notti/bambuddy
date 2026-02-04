@@ -664,10 +664,12 @@ async def list_files(
         print_name = None
         print_time = None
         filament_grams = None
+        sliced_for_model = None
         if f.file_metadata:
             print_name = f.file_metadata.get("print_name")
             print_time = f.file_metadata.get("print_time_seconds")
             filament_grams = f.file_metadata.get("filament_used_grams")
+            sliced_for_model = f.file_metadata.get("sliced_for_model")
 
         file_list.append(
             FileListResponse(
@@ -685,6 +687,7 @@ async def list_files(
                 print_name=print_name,
                 print_time_seconds=print_time,
                 filament_used_grams=filament_grams,
+                sliced_for_model=sliced_for_model,
             )
         )
 
@@ -1661,6 +1664,8 @@ async def get_library_file_filament_requirements(
                                 used_g = filament_elem.get("used_g", "0")
                                 used_m = filament_elem.get("used_m", "0")
 
+                                tray_info_idx = filament_elem.get("tray_info_idx", "")
+
                                 try:
                                     used_grams = float(used_g)
                                 except (ValueError, TypeError):
@@ -1674,6 +1679,7 @@ async def get_library_file_filament_requirements(
                                             "color": filament_color,
                                             "used_grams": round(used_grams, 1),
                                             "used_meters": float(used_m) if used_m else 0,
+                                            "tray_info_idx": tray_info_idx,
                                         }
                                     )
                             break
@@ -1685,6 +1691,8 @@ async def get_library_file_filament_requirements(
                         filament_color = filament_elem.get("color", "")
                         used_g = filament_elem.get("used_g", "0")
                         used_m = filament_elem.get("used_m", "0")
+
+                        tray_info_idx = filament_elem.get("tray_info_idx", "")
 
                         try:
                             used_grams = float(used_g)
@@ -1699,6 +1707,7 @@ async def get_library_file_filament_requirements(
                                     "color": filament_color,
                                     "used_grams": round(used_grams, 1),
                                     "used_meters": float(used_m) if used_m else 0,
+                                    "tray_info_idx": tray_info_idx,
                                 }
                             )
 
@@ -1957,6 +1966,17 @@ async def get_file(
             )
         duplicate_count = len(duplicates)
 
+    # Extract key metadata fields
+    print_name = None
+    print_time = None
+    filament_grams = None
+    sliced_for_model = None
+    if file.file_metadata:
+        print_name = file.file_metadata.get("print_name")
+        print_time = file.file_metadata.get("print_time_seconds")
+        filament_grams = file.file_metadata.get("filament_used_grams")
+        sliced_for_model = file.file_metadata.get("sliced_for_model")
+
     return FileResponseSchema(
         id=file.id,
         folder_id=file.folder_id,
@@ -1979,6 +1999,10 @@ async def get_file(
         created_by_username=file.created_by.username if file.created_by else None,
         created_at=file.created_at,
         updated_at=file.updated_at,
+        print_name=print_name,
+        print_time_seconds=print_time,
+        filament_used_grams=filament_grams,
+        sliced_for_model=sliced_for_model,
     )
 
 
