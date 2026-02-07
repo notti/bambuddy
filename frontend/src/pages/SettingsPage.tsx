@@ -1981,7 +1981,7 @@ export function SettingsPage() {
                     <div className="flex items-center gap-1 mt-1">
                       <Lock className="w-3 h-3 text-bambu-green" />
                       <span className="text-xs text-bambu-green">
-                        Automatically enabled via environment variables
+                        {t('settings.autoEnabledViaEnv')}
                       </span>
                     </div>
                   )}
@@ -2007,7 +2007,7 @@ export function SettingsPage() {
                       Home Assistant URL
                       {localSettings.ha_url_from_env && (
                         <span className="ml-2 text-xs text-bambu-green">
-                          (Environment Managed)
+                          {t('settings.environmentManagedLabel')}
                         </span>
                       )}
                     </label>
@@ -2028,7 +2028,7 @@ export function SettingsPage() {
                     </div>
                     {localSettings.ha_url_from_env && (
                       <p className="text-xs text-bambu-gray mt-1">
-                        Value set by HA_URL environment variable (read-only)
+                        {t('settings.urlFromEnvReadOnly')}
                       </p>
                     )}
                   </div>
@@ -2038,7 +2038,7 @@ export function SettingsPage() {
                       Long-Lived Access Token
                       {localSettings.ha_token_from_env && (
                         <span className="ml-2 text-xs text-bambu-green">
-                          (Environment Managed)
+                          {t('settings.environmentManagedLabel')}
                         </span>
                       )}
                     </label>
@@ -2059,7 +2059,7 @@ export function SettingsPage() {
                     </div>
                     {localSettings.ha_token_from_env ? (
                       <p className="text-xs text-bambu-gray mt-1">
-                        Value set by HA_TOKEN environment variable (read-only)
+                        {t('settings.tokenFromEnvReadOnly')}
                       </p>
                     ) : (
                       <p className="text-xs text-bambu-gray mt-1">
