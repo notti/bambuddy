@@ -10,6 +10,9 @@ All notable changes to Bambuddy will be documented in this file.
 - **SSDP Discovery Limitations** — Added table showing when SSDP discovery works (same LAN, dual-homed, Docker host mode) vs when manual IP entry is required (VPN, Docker bridge, port forwarding). Updated wiki, README, and website.
 - **Firewall Rules Updated** — Added port 50000-50100/tcp to all UFW, firewalld, and iptables examples for proxy mode FTP passive data.
 
+### Added
+- **Hostname Support for Printers** ([#290](https://github.com/maziggy/bambuddy/issues/290)) — Printers can now be added using hostnames (e.g., `printer.local`, `my-printer.home.lan`) in addition to IPv4 addresses. Updated backend validation, frontend forms, and all locale labels.
+
 ### Fixed
 - **Filament Usage Charts Inflated by Quantity Multiplier** ([#229](https://github.com/maziggy/bambuddy/issues/229)) — Daily, weekly, and filament-type charts were multiplying `filament_used_grams` by print quantity, even though the value already represents the total for the entire job. A 26-object print using 126g was counted as 3,276g. Removed the erroneous multiplier from three aggregations in `FilamentTrends.tsx`.
 - **Energy Cost Shows 0.00 in "Total Consumption" Mode** ([#284](https://github.com/maziggy/bambuddy/issues/284)) — Statistics Quick Stats showed 0.00 energy cost when Energy Display Mode was set to "Total Consumption" with Home Assistant smart plugs. The `homeassistant_service` was not configured with HA URL/token before querying plug energy data, causing it to silently return nothing.

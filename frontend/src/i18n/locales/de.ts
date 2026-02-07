@@ -115,7 +115,7 @@ export default {
     deletePrinter: 'Drucker löschen',
     printerName: 'Druckername',
     serialNumber: 'Seriennummer',
-    ipAddress: 'IP-Adresse',
+    ipAddress: 'IP-Adresse / Hostname',
     accessCode: 'Zugangscode',
     model: 'Modell',
     nozzleCount: 'Düsenanzahl',

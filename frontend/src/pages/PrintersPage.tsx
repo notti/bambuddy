@@ -3846,11 +3846,11 @@ function AddPrinterModal({
               <input
                 type="text"
                 required
-                pattern="\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+                pattern="(\d{1,3}(\.\d{1,3}){3}|[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*)"
                 className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
                 value={form.ip_address}
                 onChange={(e) => setForm({ ...form, ip_address: e.target.value })}
-                placeholder="192.168.1.100"
+                placeholder="192.168.1.100 or printer.local"
               />
             </div>
             <div>
@@ -4223,11 +4223,11 @@ function EditPrinterModal({
               <input
                 type="text"
                 required
-                pattern="\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+                pattern="(\d{1,3}(\.\d{1,3}){3}|[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*)"
                 className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
                 value={form.ip_address}
                 onChange={(e) => setForm({ ...form, ip_address: e.target.value })}
-                placeholder="192.168.1.100"
+                placeholder="192.168.1.100 or printer.local"
               />
             </div>
             <div>
