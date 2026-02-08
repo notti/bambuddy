@@ -4,20 +4,24 @@ All notable changes to Bambuddy will be documented in this file.
 
 ## [0.1.9b] - Not released
 
+### New Features
+- **Hostname Support for Printers** ([#290](https://github.com/maziggy/bambuddy/issues/290)) — Printers can now be added using hostnames (e.g., `printer.local`, `my-printer.home.lan`) in addition to IPv4 addresses. Updated backend validation, frontend forms, and all locale labels.
+- **Camera View Controls** ([#291](https://github.com/maziggy/bambuddy/issues/291)) — Added chamber light toggle and skip objects buttons to both embedded camera viewer and standalone camera page. Extracted skip objects modal into a reusable `SkipObjectsModal` component shared across PrintersPage and both camera views.
+- **Per-Filament Spoolman Usage Tracking** ([#277](https://github.com/maziggy/bambuddy/pull/277)) — Accurate per-filament usage tracking for Spoolman integration with G-code parsing. Parses 3MF files at print start to build per-layer, per-filament extrusion maps. Reports accurate partial usage when prints fail or are cancelled based on actual layer progress. Tracking data stored in database to survive server restarts. Uses Spoolman's filament density for mm-to-grams conversion. Prefers `tray_uuid` over `tag_uid` for spool identification.
+- **Disable AMS Weight Sync Setting** ([#277](https://github.com/maziggy/bambuddy/pull/277)) — New toggle to prevent AMS percentage-based weight estimates from overwriting Spoolman's granular usage-based calculations. Includes conditional "Report Partial Usage for Failed Prints" toggle.
+- **Home Assistant Environment Variables** ([#283](https://github.com/maziggy/bambuddy/issues/283)) — Configure Home Assistant integration via `HA_URL` and `HA_TOKEN` environment variables for zero-configuration add-on deployments. Auto-enables when both variables are set. UI fields become read-only with lock icons when env-managed. Database values preserved as fallback.
+
+### Fixed
+- **Camera Stop 401 When Auth Enabled** — Camera stop requests (`sendBeacon`) failed with 401 Unauthorized when authentication was enabled because `sendBeacon` cannot send auth headers. Replaced with `fetch` + `keepalive: true` which supports Authorization headers while remaining reliable during page unload.
+- **Spoolman Creates Duplicate Spools on Startup** ([#295](https://github.com/maziggy/bambuddy/pull/295)) — Each AMS tray independently fetched all spools from Spoolman, causing redundant API calls and duplicate spool creation with large databases (300+ spools). Now fetches spools once and reuses cached data across all tray operations. Added retry logic (3 attempts, 500ms delay) with connection recreation for transient network errors.
+- **Filament Usage Charts Inflated by Quantity Multiplier** ([#229](https://github.com/maziggy/bambuddy/issues/229)) — Daily, weekly, and filament-type charts were multiplying `filament_used_grams` by print quantity, even though the value already represents the total for the entire job. A 26-object print using 126g was counted as 3,276g. Removed the erroneous multiplier from three aggregations in `FilamentTrends.tsx`.
+- **Energy Cost Shows 0.00 in "Total Consumption" Mode** ([#284](https://github.com/maziggy/bambuddy/issues/284)) — Statistics Quick Stats showed 0.00 energy cost when Energy Display Mode was set to "Total Consumption" with Home Assistant smart plugs. The `homeassistant_service` was not configured with HA URL/token before querying plug energy data, causing it to silently return nothing.
+
 ### Documentation
 - **Proxy Mode Security Warning** — Added FTP data channel security warning to wiki, README, and website. Bambu Studio does not encrypt the FTP data channel despite negotiating PROT P; MQTT and FTP control channels are fully TLS-encrypted. VPN (Tailscale/WireGuard) recommended for full data encryption.
 - **Docker Proxy Mode Ports** — Documented FTP passive data ports 50000-50100 required for proxy mode in Docker bridge mode. Updated port mappings in wiki virtual-printer and docker guides.
 - **SSDP Discovery Limitations** — Added table showing when SSDP discovery works (same LAN, dual-homed, Docker host mode) vs when manual IP entry is required (VPN, Docker bridge, port forwarding). Updated wiki, README, and website.
 - **Firewall Rules Updated** — Added port 50000-50100/tcp to all UFW, firewalld, and iptables examples for proxy mode FTP passive data.
-
-### Added
-- **Hostname Support for Printers** ([#290](https://github.com/maziggy/bambuddy/issues/290)) — Printers can now be added using hostnames (e.g., `printer.local`, `my-printer.home.lan`) in addition to IPv4 addresses. Updated backend validation, frontend forms, and all locale labels.
-- **Camera View Controls** ([#291](https://github.com/maziggy/bambuddy/issues/291)) — Added chamber light toggle and skip objects buttons to both embedded camera viewer and standalone camera page. Extracted skip objects modal into a reusable `SkipObjectsModal` component shared across PrintersPage and both camera views.
-
-### Fixed
-- **Camera Stop 401 When Auth Enabled** — Camera stop requests (`sendBeacon`) failed with 401 Unauthorized when authentication was enabled because `sendBeacon` cannot send auth headers. Replaced with `fetch` + `keepalive: true` which supports Authorization headers while remaining reliable during page unload.
-- **Filament Usage Charts Inflated by Quantity Multiplier** ([#229](https://github.com/maziggy/bambuddy/issues/229)) — Daily, weekly, and filament-type charts were multiplying `filament_used_grams` by print quantity, even though the value already represents the total for the entire job. A 26-object print using 126g was counted as 3,276g. Removed the erroneous multiplier from three aggregations in `FilamentTrends.tsx`.
-- **Energy Cost Shows 0.00 in "Total Consumption" Mode** ([#284](https://github.com/maziggy/bambuddy/issues/284)) — Statistics Quick Stats showed 0.00 energy cost when Energy Display Mode was set to "Total Consumption" with Home Assistant smart plugs. The `homeassistant_service` was not configured with HA URL/token before querying plug energy data, causing it to silently return nothing.
 
 ### Testing
 - **Mock FTPS Server & Comprehensive FTP Test Suite** — Added 67 automated test cases against a real implicit FTPS mock server, covering every known FTP failure mode from 0.1.8+:
