@@ -696,7 +696,12 @@ class SimpleMQTTServer:
         packet += message_bytes
 
         writer.write(packet)
-        await writer.drain()
+        # Timeout the drain to prevent blocking the event loop if the
+        # MQTT client stops reading (e.g. slicer busy with FTP upload).
+        try:
+            await asyncio.wait_for(writer.drain(), timeout=5)
+        except TimeoutError:
+            logger.debug("MQTT drain timeout for %s — client may be busy", topic)
 
     async def _send_print_response(self, writer: asyncio.StreamWriter, sequence_id: str, filename: str) -> None:
         """Send project_file acknowledgment matching real Bambu printer behavior."""
