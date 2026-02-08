@@ -1622,8 +1622,14 @@ export interface UnlinkedSpool {
   location: string | null;
 }
 
+export interface LinkedSpoolInfo {
+  id: number;
+  remaining_weight: number | null;
+  filament_weight: number | null;
+}
+
 export interface LinkedSpoolsMap {
-  linked: Record<string, number>; // tag (uppercase) -> spool_id
+  linked: Record<string, LinkedSpoolInfo>; // tag (uppercase) -> spool info
 }
 
 // Update types

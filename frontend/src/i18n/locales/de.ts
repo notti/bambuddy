@@ -2184,6 +2184,7 @@ export default {
     linkSuccess: 'Spule erfolgreich mit Spoolman verknüpft',
     linkFailed: 'Verknüpfung mit Spoolman fehlgeschlagen',
     spoolId: 'Spulen-ID',
+    fillSourceLabel: '(Spoolman)',
     weight: 'Gewicht',
     remaining: 'Verbleibend',
     disableWeightSync: 'AMS-Gewichtsschätzung deaktivieren',

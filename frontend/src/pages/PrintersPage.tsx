@@ -47,7 +47,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { api, discoveryApi, firmwareApi } from '../api/client';
 import { formatDateOnly } from '../utils/date';
-import type { Printer, PrinterCreate, AMSUnit, DiscoveredPrinter, FirmwareUpdateInfo, FirmwareUploadStatus } from '../api/client';
+import type { Printer, PrinterCreate, AMSUnit, DiscoveredPrinter, FirmwareUpdateInfo, FirmwareUploadStatus, LinkedSpoolInfo } from '../api/client';
 import { Card, CardContent } from '../components/Card';
 import { Button } from '../components/Button';
 import { ConfirmModal } from '../components/ConfirmModal';
@@ -637,6 +637,17 @@ function getFillBarColor(fillLevel: number): string {
   return '#ef4444'; // Red - critical (< 15%)
 }
 
+// Calculate fill level from Spoolman weight data (used as fallback when AMS reports 0%)
+function getSpoolmanFillLevel(
+  linkedSpool: LinkedSpoolInfo | undefined
+): number | null {
+  if (!linkedSpool?.remaining_weight || !linkedSpool?.filament_weight
+      || linkedSpool.filament_weight <= 0) return null;
+  return Math.min(100, Math.round(
+    (linkedSpool.remaining_weight / linkedSpool.filament_weight) * 100
+  ));
+}
+
 function formatTime(seconds: number): string {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
@@ -923,7 +934,7 @@ function PrinterCard({
   };
   spoolmanEnabled?: boolean;
   hasUnlinkedSpools?: boolean;
-  linkedSpools?: Record<string, number>;
+  linkedSpools?: Record<string, LinkedSpoolInfo>;
   spoolmanUrl?: string | null;
   timeFormat?: 'system' | '12h' | '24h';
   cameraViewMode?: 'window' | 'embedded';
@@ -2196,6 +2207,15 @@ function PrinterCard({
                                 // Get saved slot preset mapping (for user-configured slots)
                                 const slotPreset = slotPresets?.[globalTrayId];
 
+                                // Spoolman fill level fallback (when AMS reports 0%)
+                                const trayTag = tray?.tray_uuid?.toUpperCase();
+                                const linkedSpool = trayTag ? linkedSpools?.[trayTag] : undefined;
+                                const spoolmanFill = getSpoolmanFillLevel(linkedSpool);
+                                const effectiveFill = hasFillLevel && tray.remain > 0
+                                  ? tray.remain
+                                  : (spoolmanFill ?? (hasFillLevel ? tray.remain : null));
+                                const fillSource = (hasFillLevel && tray.remain === 0 && spoolmanFill !== null) ? 'spoolman' as const : 'ams' as const;
+
                                 // Build filament data for hover card
                                 const filamentData = tray?.tray_type ? {
                                   vendor: (isBambuLabSpool(tray) ? 'Bambu Lab' : 'Generic') as 'Bambu Lab' | 'Generic',
@@ -2203,8 +2223,9 @@ function PrinterCard({
                                   colorName: getBambuColorName(tray.tray_id_name) || hexToBasicColorName(tray.tray_color),
                                   colorHex: tray.tray_color || null,
                                   kFactor: formatKValue(tray.k),
-                                  fillLevel: hasFillLevel ? tray.remain : null,
+                                  fillLevel: effectiveFill,
                                   trayUuid: tray.tray_uuid || null,
+                                  fillSource,
                                 } : null;
 
                                 // Check if this specific slot is being refreshed
@@ -2229,12 +2250,12 @@ function PrinterCard({
                                     </div>
                                     {/* Fill bar */}
                                     <div className="mt-1 h-1.5 bg-black/30 rounded-full overflow-hidden">
-                                      {hasFillLevel && tray ? (
+                                      {effectiveFill !== null && effectiveFill >= 0 && tray ? (
                                         <div
                                           className="h-full rounded-full transition-all"
                                           style={{
-                                            width: `${tray.remain}%`,
-                                            backgroundColor: getFillBarColor(tray.remain),
+                                            width: `${effectiveFill}%`,
+                                            backgroundColor: getFillBarColor(effectiveFill),
                                           }}
                                         />
                                       ) : tray?.tray_type ? (
@@ -2300,7 +2321,7 @@ function PrinterCard({
                                         spoolman={{
                                           enabled: spoolmanEnabled,
                                           hasUnlinkedSpools,
-                                          linkedSpoolId: filamentData.trayUuid ? linkedSpools?.[filamentData.trayUuid.toUpperCase()] : undefined,
+                                          linkedSpoolId: filamentData.trayUuid ? linkedSpools?.[filamentData.trayUuid.toUpperCase()]?.id : undefined,
                                           spoolmanUrl,
                                           onLinkSpool: spoolmanEnabled && filamentData.trayUuid ? (uuid) => {
                                             setLinkSpoolModal({
@@ -2374,6 +2395,15 @@ function PrinterCard({
                         // Get saved slot preset mapping (for user-configured slots)
                         const slotPreset = slotPresets?.[globalTrayId];
 
+                        // Spoolman fill level fallback (when AMS reports 0%)
+                        const htTrayTag = tray?.tray_uuid?.toUpperCase();
+                        const htLinkedSpool = htTrayTag ? linkedSpools?.[htTrayTag] : undefined;
+                        const htSpoolmanFill = getSpoolmanFillLevel(htLinkedSpool);
+                        const htEffectiveFill = hasFillLevel && tray.remain > 0
+                          ? tray.remain
+                          : (htSpoolmanFill ?? (hasFillLevel ? tray.remain : null));
+                        const htFillSource = (hasFillLevel && tray.remain === 0 && htSpoolmanFill !== null) ? 'spoolman' as const : 'ams' as const;
+
                         // Build filament data for hover card
                         const filamentData = tray?.tray_type ? {
                           vendor: (isBambuLabSpool(tray) ? 'Bambu Lab' : 'Generic') as 'Bambu Lab' | 'Generic',
@@ -2381,8 +2411,9 @@ function PrinterCard({
                           colorName: getBambuColorName(tray.tray_id_name) || hexToBasicColorName(tray.tray_color),
                           colorHex: tray.tray_color || null,
                           kFactor: formatKValue(tray.k),
-                          fillLevel: hasFillLevel ? tray.remain : null,
+                          fillLevel: htEffectiveFill,
                           trayUuid: tray.tray_uuid || null,
+                          fillSource: htFillSource,
                         } : null;
 
                         const htSlotId = tray?.id ?? 0;
@@ -2408,12 +2439,12 @@ function PrinterCard({
                             </div>
                             {/* Fill bar */}
                             <div className="mt-1 h-1.5 bg-black/30 rounded-full overflow-hidden">
-                              {hasFillLevel ? (
+                              {htEffectiveFill !== null && htEffectiveFill >= 0 ? (
                                 <div
                                   className="h-full rounded-full transition-all"
                                   style={{
-                                    width: `${tray.remain}%`,
-                                    backgroundColor: getFillBarColor(tray.remain),
+                                    width: `${htEffectiveFill}%`,
+                                    backgroundColor: getFillBarColor(htEffectiveFill),
                                   }}
                                 />
                               ) : tray?.tray_type ? (
@@ -2491,7 +2522,7 @@ function PrinterCard({
                                     spoolman={{
                                       enabled: spoolmanEnabled,
                                       hasUnlinkedSpools,
-                                      linkedSpoolId: filamentData.trayUuid ? linkedSpools?.[filamentData.trayUuid.toUpperCase()] : undefined,
+                                      linkedSpoolId: filamentData.trayUuid ? linkedSpools?.[filamentData.trayUuid.toUpperCase()]?.id : undefined,
                                       spoolmanUrl,
                                       onLinkSpool: spoolmanEnabled && filamentData.trayUuid ? (uuid) => {
                                         setLinkSpoolModal({
@@ -2579,6 +2610,11 @@ function PrinterCard({
                         // Get saved slot preset mapping (external spool uses amsId=255, trayId=0)
                         const extSlotPreset = slotPresets?.[255 * 4 + 0];
 
+                        // Spoolman fill level for external spool
+                        const extTrayTag = extTray.tray_uuid?.toUpperCase();
+                        const extLinkedSpool = extTrayTag ? linkedSpools?.[extTrayTag] : undefined;
+                        const extSpoolmanFill = getSpoolmanFillLevel(extLinkedSpool);
+
                         // Build filament data for hover card
                         const extFilamentData = {
                           vendor: (isBambuLabSpool(extTray) ? 'Bambu Lab' : 'Generic') as 'Bambu Lab' | 'Generic',
@@ -2586,8 +2622,9 @@ function PrinterCard({
                           colorName: getBambuColorName(extTray.tray_id_name) || hexToBasicColorName(extTray.tray_color),
                           colorHex: extTray.tray_color || null,
                           kFactor: formatKValue(extTray.k),
-                          fillLevel: null, // External spool has unknown fill level
+                          fillLevel: extSpoolmanFill, // Use Spoolman data if available
                           trayUuid: extTray.tray_uuid || null,
+                          fillSource: extSpoolmanFill !== null ? 'spoolman' as const : undefined,
                         };
 
                         const extSlotContent = (
@@ -2602,9 +2639,19 @@ function PrinterCard({
                             <div className="text-[9px] text-white font-bold truncate">
                               {extTray.tray_type || 'Spool'}
                             </div>
-                            {/* Unknown fill level - subtle bar */}
+                            {/* Fill bar - use Spoolman data if available */}
                             <div className="mt-1 h-1.5 bg-black/30 rounded-full overflow-hidden">
-                              <div className="h-full w-full rounded-full bg-white/50 dark:bg-gray-500/40" />
+                              {extSpoolmanFill !== null ? (
+                                <div
+                                  className="h-full rounded-full transition-all"
+                                  style={{
+                                    width: `${extSpoolmanFill}%`,
+                                    backgroundColor: getFillBarColor(extSpoolmanFill),
+                                  }}
+                                />
+                              ) : (
+                                <div className="h-full w-full rounded-full bg-white/50 dark:bg-gray-500/40" />
+                              )}
                             </div>
                           </div>
                         );
@@ -2621,7 +2668,7 @@ function PrinterCard({
                               spoolman={{
                                 enabled: spoolmanEnabled,
                                 hasUnlinkedSpools,
-                                linkedSpoolId: extFilamentData.trayUuid ? linkedSpools?.[extFilamentData.trayUuid.toUpperCase()] : undefined,
+                                linkedSpoolId: extFilamentData.trayUuid ? linkedSpools?.[extFilamentData.trayUuid.toUpperCase()]?.id : undefined,
                                 spoolmanUrl,
                                 onLinkSpool: spoolmanEnabled && extFilamentData.trayUuid ? (uuid) => {
                                   setLinkSpoolModal({

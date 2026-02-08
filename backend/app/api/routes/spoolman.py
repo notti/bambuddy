@@ -598,7 +598,7 @@ async def get_linked_spools(
         raise HTTPException(status_code=503, detail="Spoolman is not reachable")
 
     spools = await client.get_spools()
-    linked: dict[str, int] = {}
+    linked: dict[str, dict] = {}
 
     for spool in spools:
         # Check if spool has a tag in extra field
@@ -608,7 +608,12 @@ async def get_linked_spools(
             # Remove quotes if present (JSON encoded string)
             clean_tag = tag.strip('"').upper()
             if clean_tag:
-                linked[clean_tag] = spool["id"]
+                filament = spool.get("filament") or {}
+                linked[clean_tag] = {
+                    "id": spool["id"],
+                    "remaining_weight": spool.get("remaining_weight"),
+                    "filament_weight": filament.get("weight"),
+                }
 
     return {"linked": linked}
 

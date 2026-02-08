@@ -2184,6 +2184,7 @@ export default {
     linkSuccess: 'Spool linked to Spoolman successfully',
     linkFailed: 'Failed to link spool',
     spoolId: 'Spool ID',
+    fillSourceLabel: '(Spoolman)',
     weight: 'Weight',
     remaining: 'Remaining',
     disableWeightSync: 'Disable AMS Estimated Weight Sync',
